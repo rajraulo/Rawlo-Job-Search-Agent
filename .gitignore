@@ -1,0 +1,10 @@
+.env
+.env.local
+data/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.docx
+.vercel/
+chromedriver*
