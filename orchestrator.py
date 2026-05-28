@@ -283,7 +283,8 @@ def main():
     run_once()  # always run immediately on start
 
     if not args.once:
-        interval = SETTINGS.get("agent", {}).get("run_interval_minutes", 10)
+        from storage import load_config
+        interval = load_config().get("schedule_minutes", 10)
         schedule.every(interval).minutes.do(run_once)
         logger.info(f"⏰ Scheduler active — running every {interval} minute(s). Ctrl+C to stop.")
         try:

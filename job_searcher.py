@@ -32,12 +32,7 @@ logger = logging.getLogger(__name__)
 # ── Load config ──────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parent
-with open(ROOT / "settings.yaml") as f:
-    SETTINGS = yaml.safe_load(f)
-with open(ROOT / "keywords.yaml") as f:
-    KEYWORDS = yaml.safe_load(f)
-
-JOBS_FILE = ROOT / "data" / "jobs" / "found_jobs.json"
+JOBS_FILE    = ROOT / "data" / "jobs" / "found_jobs.json"
 APPLIED_FILE = ROOT / "data" / "jobs" / "applied_jobs.json"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -55,14 +50,12 @@ def save_json(path: Path, data: list):
         json.dump(data, f, indent=2, default=str)
 
 
-def score_job(job: dict) -> int:
-    """
-    Score job relevance 0-100 based on secondary keyword matches in JD.
-    """
+def score_job(job: dict, cfg: dict) -> int:
+    """Score job relevance 0-100 based on secondary keyword matches in JD."""
     description = (job.get("description") or "").lower()
     title = (job.get("title") or "").lower()
-    secondary = [k.lower() for k in KEYWORDS.get("secondary_keywords", [])]
-    exclude = [k.lower() for k in KEYWORDS.get("exclude_keywords", [])]
+    secondary = [k.lower() for k in cfg.get("secondary_keywords", [])]
+    exclude = [k.lower() for k in cfg.get("exclude_keywords", [])]
 
     # Hard exclude
     for ex in exclude:
@@ -81,6 +74,8 @@ def is_duplicate(job_id: str, existing: list) -> bool:
 
 class JobSearcher:
     def __init__(self):
+        from storage import load_config
+        self.cfg = load_config()
         self.found_jobs: list[dict] = []
         self.existing_jobs: list[dict] = load_json(JOBS_FILE)
         self.applied_ids: set[str] = {
@@ -116,9 +111,9 @@ class JobSearcher:
             "approval_id": None,
             "tailored_resume": None,
         }
-        job["relevance_score"] = score_job(job)
+        job["relevance_score"] = score_job(job, self.cfg)
 
-        min_score = SETTINGS["search"].get("min_relevance_score", 60)
+        min_score = self.cfg.get("min_relevance_score", 60)
         if job["relevance_score"] < min_score:
             logger.debug(f"Skipping low-score job: {job['title']} ({job['relevance_score']})")
             return
@@ -141,8 +136,6 @@ class JobSearcher:
         logger.info(f"Scraping batch complete. Jobs found this run: {len(self.found_jobs)}")
 
     def _build_queries(self) -> list[Query]:
-        cfg = SETTINGS["search"]
-
         # Map config strings → LinkedIn filter enums
         exp_map = {
             "internship": ExperienceLevelFilters.INTERNSHIP,
@@ -159,19 +152,14 @@ class JobSearcher:
             "temporary": TypeFilters.TEMPORARY,
         }
 
-        exp_filters = [exp_map[e] for e in cfg.get("experience_levels", []) if e in exp_map]
-        type_filters = [type_map[t] for t in cfg.get("job_types", []) if t in type_map]
-
-        days = cfg.get("posted_within_days", 7)
-        time_filter = TimeFilters.MONTH if days >= 30 else TimeFilters.WEEK
+        exp_filters = [exp_map[e] for e in self.cfg.get("experience_levels", []) if e in exp_map]
+        type_filters = [type_map[t] for t in self.cfg.get("job_types", []) if t in type_map]
+        time_filter  = TimeFilters.WEEK
 
         queries = []
-        all_locations = (
-            list(cfg["locations"].get("uae", [])) +
-            list(cfg["locations"].get("global", []))
-        )
+        all_locations = self.cfg.get("locations", [])
 
-        for keyword in KEYWORDS.get("primary_keywords", []):
+        for keyword in self.cfg.get("primary_keywords", []):
             for location in all_locations:
                 queries.append(
                     Query(
@@ -197,7 +185,7 @@ class JobSearcher:
     def run(self) -> list[dict]:
         logger.info("🔍 Starting job search...")
         queries = self._build_queries()
-        max_jobs = SETTINGS["agent"].get("max_jobs_per_run", 20)
+        max_jobs = self.cfg.get("max_jobs_per_run", 20)
 
         for query in queries:
             if len(self.found_jobs) >= max_jobs:
