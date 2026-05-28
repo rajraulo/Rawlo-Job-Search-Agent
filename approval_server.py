@@ -147,6 +147,46 @@ def status():
     return jsonify({"total": len(jobs), "by_status": counts})
 
 
+@app.route("/")
+def index():
+    jobs = load_jobs()
+    counts = {}
+    for j in jobs:
+        s = j.get("status", "unknown")
+        counts[s] = counts.get(s, 0) + 1
+    from storage import use_db
+    storage = "neon" if use_db() else "local"
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Job Agent</title>
+<style>
+  body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+  .card{background:#1e293b;border-radius:16px;padding:48px;max-width:480px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+  h1{margin:0 0 8px;font-size:26px}
+  p{color:#94a3b8;margin:4px 0}
+  .badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:13px;margin:3px;background:#334155}
+  .green{background:#22c55e22;color:#22c55e}
+  .blue{background:#0ea5e922;color:#0ea5e9}
+  .row{margin-top:24px}
+</style></head>
+<body><div class="card">
+  <h1>🤖 Job Agent</h1>
+  <p style="color:#0ea5e9">Approval server is running &nbsp;·&nbsp; Storage: {{ storage }}</p>
+  <div class="row">
+    {% for status, count in counts.items() %}
+    <span class="badge">{{ status }}: {{ count }}</span>
+    {% endfor %}
+    {% if not counts %}<span class="badge">No jobs yet</span>{% endif %}
+  </div>
+  <div class="row" style="font-size:13px;color:#475569">
+    <p>Endpoints: /approve1/&lt;id&gt; &nbsp; /skip/&lt;id&gt; &nbsp; /approve2/&lt;id&gt; &nbsp; /decline2/&lt;id&gt;</p>
+    <p><a href="/status" style="color:#0ea5e9">/status</a> &nbsp; <a href="/health" style="color:#0ea5e9">/health</a></p>
+  </div>
+</div></body></html>
+""", counts=counts, storage=storage)
+
+
 @app.route("/health")
 def health():
     from storage import use_db
