@@ -1,16 +1,17 @@
 """
-approval_server.py
-──────────────────
-Flask web app serving:
-  /              — Dashboard: job stats + recent jobs
-  /jobs          — Full jobs list
-  /config        — Search configuration (tech stack, locations, schedule)
-  /approve1/<id> — Stage 1: user approves job → triggers resume tailoring
-  /skip/<id>     — Stage 1: skip this job
-  /approve2/<id> — Stage 2: final approval → agent will apply
-  /decline2/<id> — Stage 2: decline after seeing resume
-  /status        — JSON status summary
-  /health        — JSON health check
+approval_server.py — Flask web app (runs on Vercel)
+
+Pages:
+  /          Dashboard: stats, recent jobs, Search Now button, schedule info
+  /jobs      Full jobs list with filters
+  /config    Search config (keywords, locations, schedule, credentials)
+  /trigger   POST — triggers an immediate search on the local orchestrator
+
+Approval email endpoints:
+  /approve1/<id>   Stage 1: proceed with this job
+  /skip/<id>       Stage 1: skip
+  /approve2/<id>   Stage 2: apply with this resume
+  /decline2/<id>   Stage 2: decline
 """
 
 import logging
@@ -22,308 +23,280 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 
 load_dotenv()
 
-from storage import load_config, load_jobs, save_config, save_jobs
+from storage import (
+    clear_trigger, get_trigger, load_config, load_jobs, load_status,
+    save_config, save_jobs, set_trigger, use_db,
+)
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
-# ── Shared layout ─────────────────────────────────────────────────────────────
+# ── Layout ────────────────────────────────────────────────────────────────────
 
-BASE = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Job Agent — {{ page_title }}</title>
-<style>
+CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh}
-a{color:#0ea5e9;text-decoration:none}
-a:hover{text-decoration:underline}
-
-/* Nav */
-nav{background:#1e293b;border-bottom:1px solid #334155;padding:0 32px;display:flex;align-items:center;gap:32px;height:56px}
-nav .brand{font-size:17px;font-weight:700;color:#f1f5f9;margin-right:auto}
-nav a{color:#94a3b8;font-size:14px;font-weight:500;padding:6px 0;border-bottom:2px solid transparent}
+a{color:#0ea5e9;text-decoration:none}a:hover{text-decoration:underline}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:0 32px;display:flex;align-items:center;gap:0;height:56px}
+.brand{font-size:17px;font-weight:700;color:#f1f5f9;margin-right:auto}
+nav a{color:#94a3b8;font-size:14px;font-weight:500;padding:0 16px;height:56px;display:flex;align-items:center;border-bottom:2px solid transparent}
 nav a.active,nav a:hover{color:#e2e8f0;border-bottom-color:#0ea5e9;text-decoration:none}
-
-/* Page wrapper */
-.page{max-width:1100px;margin:0 auto;padding:32px 24px}
-h2{font-size:20px;font-weight:700;margin-bottom:20px;color:#f1f5f9}
-
-/* Stat cards */
-.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:16px;margin-bottom:32px}
-.stat{background:#1e293b;border-radius:12px;padding:20px;text-align:center;border:1px solid #334155}
-.stat .num{font-size:32px;font-weight:800;line-height:1}
-.stat .lbl{font-size:12px;color:#64748b;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
-
-/* Table */
-.table-wrap{background:#1e293b;border-radius:12px;overflow:hidden;border:1px solid #334155}
+.page{max-width:1140px;margin:0 auto;padding:32px 24px}
+h2{font-size:20px;font-weight:700;color:#f1f5f9;margin-bottom:20px}
+.row{display:flex;gap:16px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:14px;margin-bottom:28px}
+.stat{background:#1e293b;border-radius:12px;padding:18px 14px;text-align:center;border:1px solid #334155}
+.stat .num{font-size:30px;font-weight:800;line-height:1}
+.stat .lbl{font-size:11px;color:#64748b;margin-top:5px;text-transform:uppercase;letter-spacing:.5px}
+.info-bar{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 20px;margin-bottom:24px;display:flex;gap:32px;flex-wrap:wrap;align-items:center;font-size:13px}
+.info-bar .item{display:flex;flex-direction:column;gap:2px}
+.info-bar .item .key{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#64748b;font-weight:600}
+.info-bar .item .val{color:#e2e8f0;font-weight:600}
+.wrap{background:#1e293b;border-radius:12px;overflow:hidden;border:1px solid #334155}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th{background:#0f172a;color:#64748b;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.5px;padding:12px 16px;text-align:left}
-td{padding:12px 16px;border-top:1px solid #1e3a5f22;vertical-align:middle}
-tr:hover td{background:#1e3a5f22}
-
-/* Badges */
+th{background:#0f172a;color:#64748b;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.5px;padding:11px 16px;text-align:left}
+td{padding:11px 16px;border-top:1px solid #1e3a5f18;vertical-align:middle}
+tr:hover td{background:#1e3a5f20}
 .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700}
 .b-new{background:#334155;color:#94a3b8}
-.b-pending{background:#f59e0b22;color:#f59e0b}
-.b-approved{background:#0ea5e922;color:#0ea5e9}
+.b-p1{background:#f59e0b22;color:#f59e0b}.b-p2{background:#f59e0b22;color:#f59e0b}
+.b-a1{background:#0ea5e922;color:#0ea5e9}.b-a2{background:#6366f122;color:#6366f1}
 .b-applied{background:#22c55e22;color:#22c55e}
-.b-skipped,.b-declined{background:#ef444422;color:#ef4444}
-.b-failed{background:#ef444422;color:#ef4444}
-
-/* Buttons */
-.btn{display:inline-block;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;border:none;text-decoration:none}
-.btn-green{background:#22c55e;color:#fff}
-.btn-red{background:#ef4444;color:#fff}
-.btn-gray{background:#334155;color:#94a3b8}
-.btn-blue{background:#0ea5e9;color:#fff}
-.btn:hover{opacity:.85;text-decoration:none}
-
-/* Forms */
-.form-card{background:#1e293b;border-radius:12px;padding:28px;border:1px solid #334155;margin-bottom:24px}
-.form-card h3{font-size:15px;font-weight:700;color:#f1f5f9;margin-bottom:16px}
-label{display:block;font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-textarea,input[type=number],input[type=text],select{
-  width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;
-  color:#e2e8f0;padding:10px 14px;font-size:14px;font-family:inherit;
-  outline:none;transition:border-color .2s}
-textarea:focus,input:focus{border-color:#0ea5e9}
-textarea{resize:vertical;min-height:120px}
-.form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.hint{font-size:11px;color:#475569;margin-top:4px}
-.save-btn{margin-top:20px;padding:12px 32px;background:#0ea5e9;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;width:100%}
+.b-skip{background:#ef444422;color:#ef4444}.b-dec{background:#ef444422;color:#ef4444}
+.b-fail{background:#ef444422;color:#ef4444}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 16px;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;border:none;text-decoration:none;transition:opacity .15s}
+.btn:hover{opacity:.82;text-decoration:none}
+.btn-green{background:#22c55e;color:#fff}.btn-red{background:#ef4444;color:#fff}
+.btn-gray{background:#334155;color:#94a3b8}.btn-blue{background:#0ea5e9;color:#fff}
+.btn-purple{background:#6366f1;color:#fff}.btn-orange{background:#f59e0b;color:#0f172a}
+.btn-sm{padding:5px 11px;font-size:12px}
+.card{background:#1e293b;border-radius:12px;padding:24px;border:1px solid #334155;margin-bottom:20px}
+.card h3{font-size:15px;font-weight:700;color:#f1f5f9;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid #334155}
+label{display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;margin-top:14px}
+label:first-child{margin-top:0}
+input[type=text],input[type=email],input[type=password],input[type=number],textarea,select{
+  width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;color:#e2e8f0;
+  padding:9px 13px;font-size:13px;font-family:inherit;outline:none;transition:border-color .2s}
+input:focus,textarea:focus{border-color:#0ea5e9}
+textarea{resize:vertical;min-height:110px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:600px){.form-grid{grid-template-columns:1fr}}
+.hint{font-size:11px;color:#475569;margin-top:3px}
+.set-indicator{font-size:11px;font-weight:700;margin-left:6px}
+.is-set{color:#22c55e}.not-set{color:#ef4444}
+.save-btn{width:100%;margin-top:20px;padding:13px;background:#0ea5e9;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer}
 .save-btn:hover{background:#0284c7}
-.flash{padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:14px}
+.flash{padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:14px;font-weight:600}
 .flash-ok{background:#22c55e22;color:#22c55e;border:1px solid #22c55e44}
 .flash-err{background:#ef444422;color:#ef4444;border:1px solid #ef444444}
-</style>
-</head>
-<body>
-<nav>
+.empty{text-align:center;color:#475569;padding:40px;font-size:14px}
+.filter-bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+"""
+
+NAV = """<nav>
   <span class="brand">🤖 Job Agent</span>
-  <a href="/" class="{{ 'active' if active=='dashboard' }}">Dashboard</a>
-  <a href="/jobs" class="{{ 'active' if active=='jobs' }}">Jobs</a>
-  <a href="/config" class="{{ 'active' if active=='config' }}">Configuration</a>
-</nav>
-<div class="page">
-{% block content %}{% endblock %}
-</div>
-</body></html>"""
+  <a href="/" class="{d}">Dashboard</a>
+  <a href="/jobs" class="{j}">Jobs</a>
+  <a href="/config" class="{c}">Configuration</a>
+</nav>"""
 
-
-def _render(template, **ctx):
-    full = BASE.replace("{% block content %}{% endblock %}", template)
-    return render_template_string(full, **ctx)
+def _page(active, content, title="Job Agent"):
+    nav = NAV.format(
+        d="active" if active == "d" else "",
+        j="active" if active == "j" else "",
+        c="active" if active == "c" else "",
+    )
+    return render_template_string(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>{CSS}</style></head>
+<body>{nav}<div class="page">{content}</div></body></html>""")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-STATUS_CLASS = {
-    "new":            "b-new",
-    "pending_stage1": "b-pending",
-    "approved_stage1":"b-approved",
-    "pending_stage2": "b-pending",
-    "approved_stage2":"b-approved",
-    "applied":        "b-applied",
-    "skipped":        "b-skipped",
-    "declined_stage2":"b-declined",
-    "apply_failed":   "b-failed",
+BADGE = {
+    "new":            ("b-new",    "New"),
+    "pending_stage1": ("b-p1",     "⏳ Awaiting Approval"),
+    "approved_stage1":("b-a1",     "✅ Proceed"),
+    "pending_stage2": ("b-p2",     "⏳ Awaiting Final OK"),
+    "approved_stage2":("b-a2",     "✅ Apply"),
+    "applied":        ("b-applied","🚀 Applied"),
+    "skipped":        ("b-skip",   "⏭️ Skipped"),
+    "declined_stage2":("b-dec",    "❌ Declined"),
+    "apply_failed":   ("b-fail",   "❌ Failed"),
 }
-
-STATUS_LABEL = {
-    "new":            "New",
-    "pending_stage1": "⏳ Awaiting Stage 1",
-    "approved_stage1":"✅ Stage 1 OK",
-    "pending_stage2": "⏳ Awaiting Final OK",
-    "approved_stage2":"✅ Final OK",
-    "applied":        "🚀 Applied",
-    "skipped":        "⏭️ Skipped",
-    "declined_stage2":"❌ Declined",
-    "apply_failed":   "❌ Apply Failed",
-}
-
 
 def _badge(status):
-    cls = STATUS_CLASS.get(status, "b-new")
-    lbl = STATUS_LABEL.get(status, status)
+    cls, lbl = BADGE.get(status, ("b-new", status))
     return f'<span class="badge {cls}">{lbl}</span>'
 
-
-def _time_ago(iso: str) -> str:
-    if not iso:
-        return "—"
+def _ago(iso):
+    if not iso: return "—"
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        diff = (datetime.now(timezone.utc) - dt).total_seconds()
-        if diff < 60:    return "just now"
-        if diff < 3600:  return f"{int(diff/60)}m ago"
-        if diff < 86400: return f"{int(diff/3600)}h ago"
-        return f"{int(diff/86400)}d ago"
-    except Exception:
-        return "—"
+        if not dt.tzinfo: dt = dt.replace(tzinfo=timezone.utc)
+        s = (datetime.now(timezone.utc) - dt).total_seconds()
+        if s < 60:    return "just now"
+        if s < 3600:  return f"{int(s/60)}m ago"
+        if s < 86400: return f"{int(s/3600)}h ago"
+        return f"{int(s/86400)}d ago"
+    except: return "—"
 
+def _find(field, val):
+    return next((j for j in load_jobs() if j.get(field) == val), None)
 
-def _find_by(field: str, value: str) -> dict | None:
-    return next((j for j in load_jobs() if j.get(field) == value), None)
-
-
-def _update(field: str, value: str, status: str):
+def _update(field, val, status):
     jobs = load_jobs()
-    for job in jobs:
-        if job.get(field) == value:
-            job["status"] = status
-            job["decision_at"] = datetime.utcnow().isoformat()
+    for j in jobs:
+        if j.get(field) == val:
+            j["status"] = status
+            j["decision_at"] = datetime.utcnow().isoformat()
             break
     save_jobs(jobs)
+
+def _action_btns(job):
+    s = job.get("status", "")
+    aid  = job.get("approval_id", "")
+    aid2 = job.get("approval2_id", "")
+    url  = job.get("apply_url", "")
+    if s == "pending_stage1":
+        return (f'<a href="/approve1/{aid}" class="btn btn-green btn-sm">✅ Approve</a> '
+                f'<a href="/skip/{aid}" class="btn btn-gray btn-sm">Skip</a>')
+    if s == "pending_stage2":
+        return (f'<a href="/approve2/{aid2}" class="btn btn-purple btn-sm">🚀 Apply</a> '
+                f'<a href="/decline2/{aid2}" class="btn btn-red btn-sm">Decline</a>')
+    if url:
+        return f'<a href="{url}" target="_blank" class="btn btn-gray btn-sm">View ↗</a>'
+    return ""
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    jobs = load_jobs()
-    cfg  = load_config()
+    jobs   = load_jobs()
+    cfg    = load_config()
+    status = load_status()
+
     counts = {}
     for j in jobs:
-        s = j.get("status", "unknown")
-        counts[s] = counts.get(s, 0) + 1
+        k = j.get("status", "unknown")
+        counts[k] = counts.get(k, 0) + 1
 
-    recent = sorted(jobs, key=lambda j: j.get("scraped_at", ""), reverse=True)[:10]
+    recent = sorted(jobs, key=lambda j: j.get("scraped_at", ""), reverse=True)[:12]
 
-    return _render("""
-<h2>Dashboard</h2>
+    schedule_min = cfg.get("schedule_minutes", 10)
+    last_run     = status.get("last_run", "")
+    run_count    = status.get("run_count", 0)
+    triggered    = get_trigger()
+
+    rows = ""
+    for job in recent:
+        rows += f"""<tr>
+          <td><div style="font-weight:600;color:#f1f5f9">{job.get('title','')}</div>
+              <div style="color:#64748b;font-size:12px">{job.get('company','')}</div></td>
+          <td style="color:#94a3b8;font-size:12px">{job.get('location','')}</td>
+          <td><span style="color:#0ea5e9;font-weight:700">{job.get('relevance_score',0)}%</span></td>
+          <td>{_badge(job.get('status',''))}</td>
+          <td style="color:#64748b;font-size:12px">{_ago(job.get('scraped_at',''))}</td>
+          <td>{_action_btns(job)}</td>
+        </tr>"""
+
+    if not rows:
+        rows = '<tr><td colspan="6" class="empty">No jobs yet — click <b>Search Now</b> or start the orchestrator locally.</td></tr>'
+
+    trigger_notice = ""
+    if triggered:
+        trigger_notice = '<div class="flash flash-ok" style="margin-bottom:16px">⏳ Search triggered — the local orchestrator will pick this up within 30 seconds.</div>'
+
+    html = f"""
+{trigger_notice}
+<div class="row" style="margin-bottom:24px">
+  <h2 style="margin:0;flex:1">Dashboard</h2>
+  <form method="POST" action="/trigger">
+    <button type="submit" class="btn btn-orange" {'disabled style="opacity:.5;cursor:not-allowed"' if triggered else ''}>
+      {'⏳ Search Pending…' if triggered else '🔍 Search Now'}
+    </button>
+  </form>
+</div>
+
+<div class="info-bar">
+  <div class="item"><span class="key">Schedule</span><span class="val">Every {schedule_min} min</span></div>
+  <div class="item"><span class="key">Last Run</span><span class="val">{_ago(last_run) if last_run else 'Never'}</span></div>
+  <div class="item"><span class="key">Total Runs</span><span class="val">{run_count}</span></div>
+  <div class="item"><span class="key">Storage</span><span class="val">{'🟢 Neon' if use_db() else '🟡 Local'}</span></div>
+  <div class="item"><span class="key">Keywords</span><span class="val">{len(cfg.get('primary_keywords',[]))} configured</span></div>
+  <div class="item"><span class="key">Locations</span><span class="val">{len(cfg.get('locations',[]))} configured</span></div>
+</div>
 
 <div class="stats">
-  <div class="stat"><div class="num">{{ total }}</div><div class="lbl">Total</div></div>
-  <div class="stat"><div class="num" style="color:#f59e0b">{{ pending }}</div><div class="lbl">Pending</div></div>
-  <div class="stat"><div class="num" style="color:#22c55e">{{ applied }}</div><div class="lbl">Applied</div></div>
-  <div class="stat"><div class="num" style="color:#0ea5e9">{{ approved }}</div><div class="lbl">Approved</div></div>
-  <div class="stat"><div class="num" style="color:#64748b">{{ skipped }}</div><div class="lbl">Skipped</div></div>
-  <div class="stat"><div class="num" style="color:#6366f1">{{ schedule }}m</div><div class="lbl">Schedule</div></div>
+  <div class="stat"><div class="num">{len(jobs)}</div><div class="lbl">Total</div></div>
+  <div class="stat"><div class="num" style="color:#f59e0b">{sum(1 for j in jobs if 'pending' in j.get('status',''))}</div><div class="lbl">Pending</div></div>
+  <div class="stat"><div class="num" style="color:#22c55e">{counts.get('applied',0)}</div><div class="lbl">Applied</div></div>
+  <div class="stat"><div class="num" style="color:#0ea5e9">{sum(1 for j in jobs if 'approved' in j.get('status',''))}</div><div class="lbl">Approved</div></div>
+  <div class="stat"><div class="num" style="color:#64748b">{counts.get('skipped',0)+counts.get('declined_stage2',0)}</div><div class="lbl">Skipped</div></div>
+  <div class="stat"><div class="num" style="color:#ef4444">{counts.get('apply_failed',0)}</div><div class="lbl">Failed</div></div>
 </div>
 
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-  <h2 style="margin:0">Recent Jobs</h2>
-  <a href="/jobs" class="btn btn-gray">View all →</a>
+<div class="row"><h2 style="margin:0;flex:1">Recent Jobs</h2>
+  <a href="/jobs" class="btn btn-gray btn-sm">View all →</a>
 </div>
+<div class="wrap"><table>
+<thead><tr><th>Job</th><th>Location</th><th>Score</th><th>Status</th><th>Found</th><th>Action</th></tr></thead>
+<tbody>{rows}</tbody></table></div>"""
 
-<div class="table-wrap">
-<table>
-<thead><tr>
-  <th>Job</th><th>Location</th><th>Score</th><th>Status</th><th>Found</th><th>Action</th>
-</tr></thead>
-<tbody>
-{% for job in recent %}
-<tr>
-  <td>
-    <div style="font-weight:600;color:#f1f5f9">{{ job.title }}</div>
-    <div style="color:#64748b;font-size:12px">{{ job.company }}</div>
-  </td>
-  <td style="color:#94a3b8">{{ job.location }}</td>
-  <td><span style="color:#0ea5e9;font-weight:700">{{ job.relevance_score }}%</span></td>
-  <td>{{ badge(job.status) }}</td>
-  <td style="color:#64748b">{{ time_ago(job.get('scraped_at','')) }}</td>
-  <td>
-    {% if job.status == 'pending_stage1' %}
-      <a href="/approve1/{{ job.approval_id }}" class="btn btn-green" style="margin-right:4px">✅ Approve</a>
-      <a href="/skip/{{ job.approval_id }}" class="btn btn-gray">Skip</a>
-    {% elif job.status == 'pending_stage2' %}
-      <a href="/approve2/{{ job.approval2_id }}" class="btn btn-blue" style="margin-right:4px">🚀 Apply</a>
-      <a href="/decline2/{{ job.approval2_id }}" class="btn btn-red">Decline</a>
-    {% elif job.apply_url %}
-      <a href="{{ job.apply_url }}" target="_blank" class="btn btn-gray">View →</a>
-    {% endif %}
-  </td>
-</tr>
-{% else %}
-<tr><td colspan="6" style="text-align:center;color:#475569;padding:32px">
-  No jobs yet. Start the orchestrator to begin searching.
-</td></tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-""",
-        page_title="Dashboard", active="dashboard",
-        total=len(jobs),
-        pending=sum(1 for j in jobs if "pending" in j.get("status", "")),
-        applied=counts.get("applied", 0),
-        approved=sum(1 for j in jobs if "approved" in j.get("status", "")),
-        skipped=counts.get("skipped", 0),
-        schedule=cfg.get("schedule_minutes", 10),
-        recent=recent, badge=_badge, time_ago=_time_ago,
-    )
+    return _page("d", html, "Dashboard")
+
+
+# ── Trigger ───────────────────────────────────────────────────────────────────
+
+@app.route("/trigger", methods=["POST"])
+def trigger():
+    if use_db():
+        set_trigger()
+    return redirect("/")
 
 
 # ── Jobs list ─────────────────────────────────────────────────────────────────
 
 @app.route("/jobs")
 def jobs_page():
-    jobs = load_jobs()
-    status_filter = request.args.get("status", "")
-    if status_filter:
-        jobs = [j for j in jobs if j.get("status") == status_filter]
+    all_jobs = load_jobs()
+    sf = request.args.get("status", "")
+    jobs = [j for j in all_jobs if j.get("status") == sf] if sf else all_jobs
     jobs = sorted(jobs, key=lambda j: j.get("scraped_at", ""), reverse=True)
 
-    all_statuses = sorted({j.get("status", "") for j in load_jobs()})
+    statuses = sorted({j.get("status","") for j in all_jobs})
+    filters = f'<a href="/jobs" class="btn btn-sm {"btn-blue" if not sf else "btn-gray"}">All ({len(all_jobs)})</a> '
+    for s in statuses:
+        n = sum(1 for j in all_jobs if j.get("status") == s)
+        filters += f'<a href="/jobs?status={s}" class="btn btn-sm {"btn-blue" if sf==s else "btn-gray"}">{s} ({n})</a> '
 
-    return _render("""
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px">
-  <h2 style="margin:0">All Jobs ({{ jobs|length }})</h2>
-  <div>
-    <a href="/jobs" class="btn {{ 'btn-blue' if not status_filter else 'btn-gray' }}">All</a>
-    {% for s in all_statuses %}
-    <a href="/jobs?status={{ s }}" class="btn {{ 'btn-blue' if status_filter==s else 'btn-gray' }}" style="margin-left:4px">{{ s }}</a>
-    {% endfor %}
-  </div>
-</div>
+    rows = ""
+    for job in jobs:
+        rows += f"""<tr>
+          <td><div style="font-weight:600;color:#f1f5f9">
+            {'<a href="'+job.get('apply_url','')+ '" target="_blank" style="color:#f1f5f9">'+job.get('title','')+'</a>' if job.get('apply_url') else job.get('title','')}
+          </div><div style="color:#64748b;font-size:12px">{job.get('company','')}</div></td>
+          <td style="color:#94a3b8;font-size:12px">{job.get('location','')}</td>
+          <td><span style="color:#0ea5e9;font-weight:700">{job.get('relevance_score',0)}%</span></td>
+          <td>{_badge(job.get('status',''))}</td>
+          <td style="color:#64748b;font-size:11px">{'✅' if job.get('tailored_resume') else '—'}</td>
+          <td style="color:#64748b;font-size:12px">{_ago(job.get('scraped_at',''))}</td>
+          <td>{_action_btns(job)}</td>
+        </tr>"""
 
-<div class="table-wrap">
-<table>
-<thead><tr>
-  <th>Job</th><th>Location</th><th>Score</th><th>Status</th><th>Resume</th><th>Found</th><th>Action</th>
-</tr></thead>
-<tbody>
-{% for job in jobs %}
-<tr>
-  <td>
-    <div style="font-weight:600;color:#f1f5f9">
-      {% if job.apply_url %}<a href="{{ job.apply_url }}" target="_blank" style="color:#f1f5f9">{{ job.title }}</a>{% else %}{{ job.title }}{% endif %}
-    </div>
-    <div style="color:#64748b;font-size:12px">{{ job.company }}</div>
-  </td>
-  <td style="color:#94a3b8;font-size:12px">{{ job.location }}</td>
-  <td><span style="color:#0ea5e9;font-weight:700">{{ job.relevance_score }}%</span></td>
-  <td>{{ badge(job.status) }}</td>
-  <td style="color:#64748b;font-size:12px">{{ '✅' if job.tailored_resume else '—' }}</td>
-  <td style="color:#64748b;font-size:12px">{{ time_ago(job.get('scraped_at','')) }}</td>
-  <td>
-    {% if job.status == 'pending_stage1' %}
-      <a href="/approve1/{{ job.approval_id }}" class="btn btn-green" style="margin-right:4px">✅</a>
-      <a href="/skip/{{ job.approval_id }}" class="btn btn-gray">Skip</a>
-    {% elif job.status == 'pending_stage2' %}
-      <a href="/approve2/{{ job.approval2_id }}" class="btn btn-blue" style="margin-right:4px">🚀</a>
-      <a href="/decline2/{{ job.approval2_id }}" class="btn btn-red">✗</a>
-    {% elif job.apply_url %}
-      <a href="{{ job.apply_url }}" target="_blank" class="btn btn-gray">View</a>
-    {% endif %}
-  </td>
-</tr>
-{% else %}
-<tr><td colspan="7" style="text-align:center;color:#475569;padding:32px">No jobs found.</td></tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-""",
-        page_title="Jobs", active="jobs",
-        jobs=jobs, status_filter=status_filter,
-        all_statuses=all_statuses, badge=_badge, time_ago=_time_ago,
-    )
+    if not rows:
+        rows = '<tr><td colspan="7" class="empty">No jobs found.</td></tr>'
+
+    html = f"""
+<div class="row"><h2 style="margin:0;flex:1">Jobs ({len(jobs)})</h2></div>
+<div class="filter-bar">{filters}</div>
+<div class="wrap"><table>
+<thead><tr><th>Job</th><th>Location</th><th>Score</th><th>Status</th><th>Resume</th><th>Found</th><th>Action</th></tr></thead>
+<tbody>{rows}</tbody></table></div>"""
+
+    return _page("j", html, "Jobs")
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -332,156 +305,203 @@ def jobs_page():
 def config_page():
     flash = ""
     cfg = load_config()
+    creds = cfg.get("credentials", {})
 
     if request.method == "POST":
         try:
-            def _lines(field):
-                return [l.strip() for l in request.form.get(field, "").splitlines() if l.strip()]
+            def lines(f): return [l.strip() for l in request.form.get(f,"").splitlines() if l.strip()]
+            def keep(field, existing):
+                val = request.form.get(field, "").strip()
+                return val if val else existing  # keep existing if field left blank
 
-            cfg["primary_keywords"]   = _lines("primary_keywords")
-            cfg["secondary_keywords"] = _lines("secondary_keywords")
-            cfg["exclude_keywords"]   = _lines("exclude_keywords")
-            cfg["locations"]          = _lines("locations")
+            cfg["primary_keywords"]    = lines("primary_keywords")
+            cfg["secondary_keywords"]  = lines("secondary_keywords")
+            cfg["exclude_keywords"]    = lines("exclude_keywords")
+            cfg["locations"]           = lines("locations")
             cfg["min_relevance_score"] = int(request.form.get("min_relevance_score", 60))
-            cfg["schedule_minutes"]   = int(request.form.get("schedule_minutes", 10))
-            cfg["max_jobs_per_run"]   = int(request.form.get("max_jobs_per_run", 20))
+            cfg["schedule_minutes"]    = int(request.form.get("schedule_minutes", 10))
+            cfg["max_jobs_per_run"]    = int(request.form.get("max_jobs_per_run", 20))
+
+            cfg["credentials"] = {
+                "approval_email":    keep("approval_email",    creds.get("approval_email","")),
+                "approval_base_url": keep("approval_base_url", creds.get("approval_base_url","")),
+                "smtp_host":         keep("smtp_host",         creds.get("smtp_host","smtp.gmail.com")),
+                "smtp_port":         int(request.form.get("smtp_port") or creds.get("smtp_port", 587)),
+                "smtp_user":         keep("smtp_user",         creds.get("smtp_user","")),
+                "smtp_password":     keep("smtp_password",     creds.get("smtp_password","")),
+                "li_at":             keep("li_at",             creds.get("li_at","")),
+                "li_user_email":     keep("li_user_email",     creds.get("li_user_email","")),
+                "li_user_phone":     keep("li_user_phone",     creds.get("li_user_phone","")),
+            }
             save_config(cfg)
+            creds = cfg["credentials"]
             flash = "ok"
         except Exception as e:
             flash = f"err:{e}"
 
-    def _nl(lst):
-        return "\n".join(lst) if lst else ""
+    def nl(lst): return "\n".join(lst) if lst else ""
+    def dot(field): return '<span class="set-indicator is-set">✅ Set</span>' if creds.get(field) else '<span class="set-indicator not-set">Not set</span>'
 
-    return _render("""
-{% if flash == 'ok' %}
-<div class="flash flash-ok">✅ Configuration saved. The agent will use these settings on the next run.</div>
-{% elif flash %}
-<div class="flash flash-err">❌ {{ flash }}</div>
-{% endif %}
+    flash_html = ""
+    if flash == "ok":
+        flash_html = '<div class="flash flash-ok">✅ Configuration saved. The agent will use these settings on the next run.</div>'
+    elif flash:
+        flash_html = f'<div class="flash flash-err">❌ {flash}</div>'
 
+    html = f"""
+{flash_html}
 <h2>Configuration</h2>
 <form method="POST" action="/config">
 
-<div class="form-card">
-  <h3>🔍 Technology Stack — Primary Keywords</h3>
-  <label>Job titles / roles to search for (one per line)</label>
-  <textarea name="primary_keywords" placeholder="Python Developer&#10;DevOps Engineer&#10;Cloud Architect">{{ primary_keywords }}</textarea>
-  <p class="hint">These are used as the main search query on LinkedIn.</p>
+<div class="card">
+  <h3>🔍 Job Search — Technology Stack</h3>
+  <label>Primary Keywords — job titles to search on LinkedIn (one per line)</label>
+  <textarea name="primary_keywords" placeholder="Python Developer&#10;DevOps Engineer&#10;Cloud Architect&#10;Site Reliability Engineer">{nl(cfg.get('primary_keywords',[]))}</textarea>
+  <div class="hint">Each keyword is searched separately across all locations.</div>
+
+  <label>Secondary Keywords — skills for match scoring (one per line)</label>
+  <textarea name="secondary_keywords" placeholder="Kubernetes&#10;Terraform&#10;AWS&#10;Docker&#10;CI/CD&#10;Python&#10;Ansible">{nl(cfg.get('secondary_keywords',[]))}</textarea>
+  <div class="hint">More matches in the job description = higher relevance score.</div>
+
+  <label>Exclude Keywords — skip jobs containing these (one per line)</label>
+  <textarea name="exclude_keywords" placeholder="Intern&#10;Junior&#10;Manager&#10;Director" style="min-height:80px">{nl(cfg.get('exclude_keywords',[]))}</textarea>
 </div>
 
-<div class="form-card">
-  <h3>⭐ Secondary Keywords (Skill Matching)</h3>
-  <label>Skills to match in the job description (one per line)</label>
-  <textarea name="secondary_keywords" placeholder="Kubernetes&#10;Terraform&#10;AWS&#10;CI/CD&#10;Docker">{{ secondary_keywords }}</textarea>
-  <p class="hint">Used to calculate the match score. More hits = higher score.</p>
-</div>
-
-<div class="form-card">
-  <h3>🚫 Exclude Keywords</h3>
-  <label>Skip any job containing these words in the title or description (one per line)</label>
-  <textarea name="exclude_keywords" placeholder="Intern&#10;Junior&#10;Manager" style="min-height:80px">{{ exclude_keywords }}</textarea>
-</div>
-
-<div class="form-card">
+<div class="card">
   <h3>📍 Locations</h3>
   <label>Locations to search in (one per line)</label>
-  <textarea name="locations" placeholder="Dubai, UAE&#10;Abu Dhabi, UAE&#10;Remote&#10;United Kingdom&#10;Germany">{{ locations }}</textarea>
-  <p class="hint">Each location is searched separately for every keyword.</p>
+  <textarea name="locations" placeholder="Dubai, UAE&#10;Abu Dhabi, UAE&#10;Remote&#10;United Kingdom&#10;Germany&#10;Singapore">{nl(cfg.get('locations',[]))}</textarea>
+  <div class="hint">Each location is searched for every keyword above.</div>
 </div>
 
-<div class="form-card">
+<div class="card">
   <h3>⚙️ Agent Settings</h3>
-  <div class="form-row">
-    <div>
-      <label>Minimum Match Score (%)</label>
-      <input type="number" name="min_relevance_score" value="{{ min_score }}" min="0" max="100">
-      <p class="hint">Jobs below this score are ignored.</p>
-    </div>
+  <div class="form-grid">
     <div>
       <label>Search Interval (minutes)</label>
-      <input type="number" name="schedule_minutes" value="{{ schedule }}" min="5" max="1440">
-      <p class="hint">How often the local orchestrator polls LinkedIn.</p>
+      <input type="number" name="schedule_minutes" value="{cfg.get('schedule_minutes',10)}" min="5" max="1440">
+      <div class="hint">How often the local orchestrator polls LinkedIn. Restart orchestrator to apply.</div>
+    </div>
+    <div>
+      <label>Minimum Match Score (%)</label>
+      <input type="number" name="min_relevance_score" value="{cfg.get('min_relevance_score',60)}" min="0" max="100">
+      <div class="hint">Jobs below this threshold are ignored.</div>
     </div>
   </div>
-  <div style="margin-top:16px">
-    <label>Max Jobs Per Run</label>
-    <input type="number" name="max_jobs_per_run" value="{{ max_jobs }}" min="1" max="100" style="max-width:200px">
-    <p class="hint">Stop searching after finding this many new jobs in one run.</p>
+  <label style="margin-top:16px">Max New Jobs Per Run</label>
+  <input type="number" name="max_jobs_per_run" value="{cfg.get('max_jobs_per_run',20)}" min="1" max="100" style="max-width:160px">
+</div>
+
+<div class="card">
+  <h3>📧 Email & Notifications</h3>
+  <div class="form-grid">
+    <div>
+      <label>Notification Email {dot('approval_email')}</label>
+      <input type="email" name="approval_email" value="{creds.get('approval_email','')}" placeholder="you@gmail.com">
+      <div class="hint">Where approval emails are sent.</div>
+    </div>
+    <div>
+      <label>Approval Server URL {dot('approval_base_url')}</label>
+      <input type="text" name="approval_base_url" value="{creds.get('approval_base_url','')}" placeholder="https://agent-rawlo.vercel.app">
+      <div class="hint">Base URL for approve/skip links in emails.</div>
+    </div>
+  </div>
+  <div class="form-grid" style="margin-top:4px">
+    <div>
+      <label>SMTP Username (Gmail) {dot('smtp_user')}</label>
+      <input type="email" name="smtp_user" value="{creds.get('smtp_user','')}" placeholder="sender@gmail.com">
+    </div>
+    <div>
+      <label>SMTP App Password {dot('smtp_password')}</label>
+      <input type="password" name="smtp_password" placeholder="{'Leave blank to keep existing' if creds.get('smtp_password') else 'xxxx xxxx xxxx xxxx'}">
+      <div class="hint">Use a Gmail App Password, not your real password.</div>
+    </div>
+  </div>
+  <div class="form-grid" style="margin-top:4px">
+    <div>
+      <label>SMTP Host</label>
+      <input type="text" name="smtp_host" value="{creds.get('smtp_host','smtp.gmail.com')}">
+    </div>
+    <div>
+      <label>SMTP Port</label>
+      <input type="number" name="smtp_port" value="{creds.get('smtp_port',587)}">
+    </div>
   </div>
 </div>
 
-<button type="submit" class="save-btn">💾 Save Configuration</button>
-</form>
-""",
-        page_title="Configuration", active="config",
-        flash=flash,
-        primary_keywords=_nl(cfg.get("primary_keywords", [])),
-        secondary_keywords=_nl(cfg.get("secondary_keywords", [])),
-        exclude_keywords=_nl(cfg.get("exclude_keywords", [])),
-        locations=_nl(cfg.get("locations", [])),
-        min_score=cfg.get("min_relevance_score", 60),
-        schedule=cfg.get("schedule_minutes", 10),
-        max_jobs=cfg.get("max_jobs_per_run", 20),
-    )
+<div class="card">
+  <h3>🔗 LinkedIn Credentials</h3>
+  <label>LinkedIn Session Cookie (li_at) {dot('li_at')}</label>
+  <input type="password" name="li_at" placeholder="{'Leave blank to keep existing' if creds.get('li_at') else 'AQEDATxxxxxxxxxxxx'}">
+  <div class="hint">Get from Chrome DevTools → Application → Cookies → linkedin.com → li_at value. Required for Easy Apply.</div>
+
+  <div class="form-grid" style="margin-top:4px">
+    <div>
+      <label>LinkedIn Email {dot('li_user_email')}</label>
+      <input type="email" name="li_user_email" value="{creds.get('li_user_email','')}" placeholder="you@gmail.com">
+      <div class="hint">Used to fill Easy Apply forms.</div>
+    </div>
+    <div>
+      <label>LinkedIn Phone {dot('li_user_phone')}</label>
+      <input type="text" name="li_user_phone" value="{creds.get('li_user_phone','')}" placeholder="+971 50 123 4567">
+      <div class="hint">Used to fill Easy Apply phone fields.</div>
+    </div>
+  </div>
+</div>
+
+<button type="submit" class="save-btn">💾 Save All Configuration</button>
+</form>"""
+
+    return _page("c", html, "Configuration")
 
 
 # ── Approval email routes ─────────────────────────────────────────────────────
 
-RESP_HTML = """
-<!DOCTYPE html><html><head><meta charset="utf-8"><title>Job Agent</title>
-<style>body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.card{background:#1e293b;border-radius:16px;padding:48px;max-width:480px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-.icon{font-size:64px;margin-bottom:16px}h1{margin:0 0 8px;font-size:24px}p{color:#94a3b8;line-height:1.6}
-.co{color:#0ea5e9;font-weight:600}.back{margin-top:24px;display:inline-block;color:#0ea5e9;font-size:14px}</style>
-</head><body><div class="card">
-<div class="icon">{{ icon }}</div><h1>{{ title }}</h1><p>{{ message }}</p>
-{% if job %}<p><span class="co">{{ job.title }} @ {{ job.company }}</span></p>{% endif %}
-<a href="/" class="back">← Back to Dashboard</a>
-</div></body></html>"""
+CARD = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Job Agent</title>
+<style>body{{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
+.c{{background:#1e293b;border-radius:16px;padding:48px;max-width:480px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.4)}}
+.i{{font-size:64px;margin-bottom:16px}}h1{{margin:0 0 8px;font-size:24px}}p{{color:#94a3b8;line-height:1.6}}
+.co{{color:#0ea5e9;font-weight:600}}.back{{margin-top:24px;display:inline-block;color:#0ea5e9;font-size:14px}}</style>
+</head><body><div class="c"><div class="i">{icon}</div><h1>{title}</h1><p>{msg}</p>
+{job_line}<a href="/" class="back">← Dashboard</a></div></body></html>"""
 
-def _resp(icon, title, message, job=None, status=200):
-    return render_template_string(RESP_HTML, icon=icon, title=title, message=message, job=job), status
+def _card(icon, title, msg, job=None, code=200):
+    jl = f'<p><span class="co">{job["title"]} @ {job["company"]}</span></p>' if job else ""
+    return CARD.format(icon=icon, title=title, msg=msg, job_line=jl), code
 
 
-@app.route("/approve1/<approval_id>")
-def approve1(approval_id):
-    job = _find_by("approval_id", approval_id)
-    if not job:
-        return _resp("❌", "Not Found", "This link is invalid or already used.", status=404)
-    if job.get("status") != "pending_stage1":
-        return _resp("ℹ️", "Already Decided", f"This job is already: {job.get('status')}", job=job)
-    _update("approval_id", approval_id, "approved_stage1")
-    return _resp("✅", "Approved!", "Your agent will tailor your resume and send it for final review.", job=job)
+@app.route("/approve1/<aid>")
+def approve1(aid):
+    job = _find("approval_id", aid)
+    if not job: return _card("❌","Not Found","This link is invalid or already used.", code=404)
+    if job.get("status") != "pending_stage1": return _card("ℹ️","Already Decided",f"Status: {job.get('status')}", job=job)
+    _update("approval_id", aid, "approved_stage1")
+    return _card("✅","Approved!","Your agent will tailor your resume and send it for final review.", job=job)
 
 
-@app.route("/skip/<approval_id>")
-def skip(approval_id):
-    job = _find_by("approval_id", approval_id)
-    if not job:
-        return _resp("❌", "Not Found", "This link is invalid or already used.", status=404)
-    _update("approval_id", approval_id, "skipped")
-    return _resp("⏭️", "Job Skipped", "Got it! This job has been removed from your queue.", job=job)
+@app.route("/skip/<aid>")
+def skip(aid):
+    job = _find("approval_id", aid)
+    if not job: return _card("❌","Not Found","This link is invalid or already used.", code=404)
+    _update("approval_id", aid, "skipped")
+    return _card("⏭️","Skipped","This job has been removed from your queue.", job=job)
 
 
-@app.route("/approve2/<approval2_id>")
-def approve2(approval2_id):
-    job = _find_by("approval2_id", approval2_id)
-    if not job:
-        return _resp("❌", "Not Found", "This link is invalid or already used.", status=404)
-    if job.get("status") != "pending_stage2":
-        return _resp("ℹ️", "Already Decided", f"This job is already: {job.get('status')}", job=job)
-    _update("approval2_id", approval2_id, "approved_stage2")
-    return _resp("🚀", "Final Approval Received!", "Your agent will apply within the next 10 minutes.", job=job)
+@app.route("/approve2/<aid2>")
+def approve2(aid2):
+    job = _find("approval2_id", aid2)
+    if not job: return _card("❌","Not Found","This link is invalid or already used.", code=404)
+    if job.get("status") != "pending_stage2": return _card("ℹ️","Already Decided",f"Status: {job.get('status')}", job=job)
+    _update("approval2_id", aid2, "approved_stage2")
+    return _card("🚀","Final Approval Received!","Your agent will apply within the next 10 minutes.", job=job)
 
 
-@app.route("/decline2/<approval2_id>")
-def decline2(approval2_id):
-    job = _find_by("approval2_id", approval2_id)
-    if not job:
-        return _resp("❌", "Not Found", "This link is invalid or already used.", status=404)
-    _update("approval2_id", approval2_id, "declined_stage2")
-    return _resp("❌", "Application Declined", "Understood. This job has been removed from your queue.", job=job)
+@app.route("/decline2/<aid2>")
+def decline2(aid2):
+    job = _find("approval2_id", aid2)
+    if not job: return _card("❌","Not Found","This link is invalid or already used.", code=404)
+    _update("approval2_id", aid2, "declined_stage2")
+    return _card("❌","Declined","This job has been removed from your queue.", job=job)
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
@@ -491,18 +511,17 @@ def status():
     jobs = load_jobs()
     counts = {}
     for j in jobs:
-        s = j.get("status", "unknown")
-        counts[s] = counts.get(s, 0) + 1
-    return jsonify({"total": len(jobs), "by_status": counts})
+        k = j.get("status", "unknown")
+        counts[k] = counts.get(k, 0) + 1
+    return jsonify({"total": len(jobs), "by_status": counts, "agent_status": load_status()})
 
 
 @app.route("/health")
 def health():
-    from storage import use_db
     return jsonify({"status": "ok", "storage": "neon" if use_db() else "local"})
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    print("🌐 Approval server running at http://localhost:8080")
+    print("🌐 Running at http://localhost:8080")
     app.run(host="0.0.0.0", port=8080, debug=False)

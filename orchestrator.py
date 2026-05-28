@@ -249,12 +249,34 @@ def check_env():
         logger.warning("LI_AT not set — LinkedIn Easy Apply will be disabled.")
 
 
+def _apply_credentials():
+    """Load credentials from Neon config and inject into env vars so all modules pick them up."""
+    from storage import load_config, use_db
+    if not use_db():
+        return
+    creds = load_config().get("credentials", {})
+    mapping = {
+        "smtp_host":       "SMTP_HOST",
+        "smtp_port":       "SMTP_PORT",
+        "smtp_user":       "SMTP_USER",
+        "smtp_password":   "SMTP_PASSWORD",
+        "approval_base_url": "APPROVAL_BASE_URL",
+        "li_at":           "LI_AT",
+        "li_user_email":   "LI_USER_EMAIL",
+        "li_user_phone":   "LI_USER_PHONE",
+    }
+    for field, env_key in mapping.items():
+        val = creds.get(field)
+        if val:
+            os.environ[env_key] = str(val)
+
+
 def run_once():
     logger.info("=" * 60)
     logger.info(f"🤖 Pipeline run starting — {datetime.utcnow().isoformat()} UTC")
     logger.info("=" * 60)
     try:
-        # Pull latest approval decisions from Neon before processing
+        _apply_credentials()
         _sync_db_to_local()
 
         new_jobs = step_search()
@@ -262,6 +284,12 @@ def run_once():
         step_tailor_and_notify_stage2()
         step_apply()
 
+        from storage import save_status, load_status
+        st = load_status()
+        save_status({
+            "last_run":  datetime.utcnow().isoformat(),
+            "run_count": st.get("run_count", 0) + 1,
+        })
         logger.info("✅ Pipeline run complete.")
     except KeyboardInterrupt:
         raise
@@ -283,13 +311,17 @@ def main():
     run_once()  # always run immediately on start
 
     if not args.once:
-        from storage import load_config
+        from storage import load_config, get_trigger, clear_trigger
         interval = load_config().get("schedule_minutes", 10)
         schedule.every(interval).minutes.do(run_once)
         logger.info(f"⏰ Scheduler active — running every {interval} minute(s). Ctrl+C to stop.")
         try:
             while True:
                 schedule.run_pending()
+                if get_trigger():
+                    logger.info("🔔 Manual trigger received from dashboard.")
+                    clear_trigger()
+                    run_once()
                 time.sleep(30)
         except KeyboardInterrupt:
             logger.info("Agent stopped by user.")

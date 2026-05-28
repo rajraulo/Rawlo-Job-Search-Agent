@@ -35,6 +35,11 @@ APPROVAL_EMAIL = SETTINGS["agent"]["approval_email"]
 
 
 def _base_url() -> str:
+    from storage import load_config, use_db
+    if use_db():
+        url = load_config().get("credentials", {}).get("approval_base_url", "")
+        if url:
+            return url.rstrip("/")
     return os.getenv("APPROVAL_BASE_URL", "http://localhost:8080").rstrip("/")
 
 
@@ -181,10 +186,14 @@ Review the resume below and click Approve in the HTML email to apply.
 
 class EmailNotifier:
     def __init__(self):
-        self.smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        self.smtp_user = os.getenv("SMTP_USER", "")
-        self.smtp_pass = os.getenv("SMTP_PASSWORD", "")
+        from storage import load_config, use_db
+        creds = load_config().get("credentials", {}) if use_db() else {}
+        self.smtp_host = creds.get("smtp_host") or os.getenv("SMTP_HOST", "smtp.gmail.com")
+        self.smtp_port = int(creds.get("smtp_port") or os.getenv("SMTP_PORT", "587"))
+        self.smtp_user = creds.get("smtp_user") or os.getenv("SMTP_USER", "")
+        self.smtp_pass = creds.get("smtp_password") or os.getenv("SMTP_PASSWORD", "")
+        global APPROVAL_EMAIL
+        APPROVAL_EMAIL = creds.get("approval_email") or APPROVAL_EMAIL
 
     def _send(self, to: str, subject: str, html: str, plain: str) -> bool:
         msg = MIMEMultipart("alternative")

@@ -2,18 +2,21 @@
 Storage abstraction: local files (dev) or Neon PostgreSQL (prod).
 DATABASE_URL is auto-injected by Vercel after linking a Neon database.
 
-Two keys in the store table:
-  agent_jobs   — list of all tracked jobs (JSON)
-  agent_config — search configuration: keywords, locations, schedule (JSON)
+Keys in the store table:
+  agent_jobs    — list of all tracked jobs (JSON)
+  agent_config  — search config: keywords, locations, schedule, credentials
+  run_trigger   — flag set by dashboard to trigger an immediate run
+  agent_status  — last run time, run count, etc.
 """
 import json
 import os
 from pathlib import Path
 
-_JOBS_KEY   = "agent_jobs"
-_CONFIG_KEY = "agent_config"
-_LOCAL_PATH = Path(__file__).resolve().parent / "data" / "jobs" / "found_jobs.json"
-_ROOT       = Path(__file__).resolve().parent
+_JOBS_KEY    = "agent_jobs"
+_CONFIG_KEY  = "agent_config"
+_TRIGGER_KEY = "run_trigger"
+_STATUS_KEY  = "agent_status"
+_ROOT        = Path(__file__).resolve().parent
 
 
 def _db_url() -> str:
@@ -62,67 +65,107 @@ def _db_set(key: str, value):
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
 
+_LOCAL_JOBS = _ROOT / "data" / "jobs" / "found_jobs.json"
+
 def load_jobs() -> list:
     if use_db():
         return _db_get(_JOBS_KEY) or []
-    if _LOCAL_PATH.exists():
-        return json.loads(_LOCAL_PATH.read_text())
+    if _LOCAL_JOBS.exists():
+        return json.loads(_LOCAL_JOBS.read_text())
     return []
-
 
 def save_jobs(jobs: list):
     if use_db():
         _db_set(_JOBS_KEY, jobs)
     else:
-        _LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _LOCAL_PATH.write_text(json.dumps(jobs, indent=2, default=str))
+        _LOCAL_JOBS.parent.mkdir(parents=True, exist_ok=True)
+        _LOCAL_JOBS.write_text(json.dumps(jobs, indent=2, default=str))
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def _default_config() -> dict:
-    """Read default config from local YAML files."""
     try:
         import yaml
         with open(_ROOT / "settings.yaml") as f:
             settings = yaml.safe_load(f)
         with open(_ROOT / "keywords.yaml") as f:
             keywords = yaml.safe_load(f)
-
         locs = settings.get("search", {}).get("locations", {})
         return {
-            "primary_keywords":   keywords.get("primary_keywords", []),
-            "secondary_keywords": keywords.get("secondary_keywords", []),
-            "exclude_keywords":   keywords.get("exclude_keywords", []),
-            "locations":          locs.get("uae", []) + locs.get("global", []),
-            "experience_levels":  settings.get("search", {}).get("experience_levels", ["mid-senior"]),
-            "job_types":          settings.get("search", {}).get("job_types", ["full-time"]),
+            "primary_keywords":    keywords.get("primary_keywords", []),
+            "secondary_keywords":  keywords.get("secondary_keywords", []),
+            "exclude_keywords":    keywords.get("exclude_keywords", []),
+            "locations":           locs.get("uae", []) + locs.get("global", []),
+            "experience_levels":   settings.get("search", {}).get("experience_levels", ["mid-senior"]),
+            "job_types":           settings.get("search", {}).get("job_types", ["full-time"]),
             "min_relevance_score": settings.get("search", {}).get("min_relevance_score", 60),
-            "schedule_minutes":   settings.get("agent", {}).get("run_interval_minutes", 10),
-            "max_jobs_per_run":   settings.get("agent", {}).get("max_jobs_per_run", 20),
+            "schedule_minutes":    settings.get("agent", {}).get("run_interval_minutes", 10),
+            "max_jobs_per_run":    settings.get("agent", {}).get("max_jobs_per_run", 20),
+            "credentials": {
+                "approval_email":    settings.get("agent", {}).get("approval_email", ""),
+                "approval_base_url": os.getenv("APPROVAL_BASE_URL", ""),
+                "smtp_host":         os.getenv("SMTP_HOST", "smtp.gmail.com"),
+                "smtp_port":         int(os.getenv("SMTP_PORT", "587")),
+                "smtp_user":         os.getenv("SMTP_USER", ""),
+                "smtp_password":     os.getenv("SMTP_PASSWORD", ""),
+                "li_at":             os.getenv("LI_AT", ""),
+                "li_user_email":     os.getenv("LI_USER_EMAIL", ""),
+                "li_user_phone":     os.getenv("LI_USER_PHONE", ""),
+            },
         }
     except Exception:
         return {
-            "primary_keywords":   [],
-            "secondary_keywords": [],
-            "exclude_keywords":   [],
-            "locations":          [],
-            "experience_levels":  ["mid-senior"],
-            "job_types":          ["full-time"],
-            "min_relevance_score": 60,
-            "schedule_minutes":   10,
-            "max_jobs_per_run":   20,
+            "primary_keywords": [], "secondary_keywords": [], "exclude_keywords": [],
+            "locations": [], "experience_levels": ["mid-senior"], "job_types": ["full-time"],
+            "min_relevance_score": 60, "schedule_minutes": 10, "max_jobs_per_run": 20,
+            "credentials": {
+                "approval_email": "", "approval_base_url": "", "smtp_host": "smtp.gmail.com",
+                "smtp_port": 587, "smtp_user": "", "smtp_password": "",
+                "li_at": "", "li_user_email": "", "li_user_phone": "",
+            },
         }
-
 
 def load_config() -> dict:
     if use_db():
         saved = _db_get(_CONFIG_KEY)
         if saved:
+            # Ensure credentials sub-key always exists
+            if "credentials" not in saved:
+                saved["credentials"] = _default_config()["credentials"]
             return saved
     return _default_config()
-
 
 def save_config(config: dict):
     if use_db():
         _db_set(_CONFIG_KEY, config)
+
+
+# ── Run trigger ───────────────────────────────────────────────────────────────
+
+def get_trigger() -> bool:
+    if use_db():
+        return bool(_db_get(_TRIGGER_KEY))
+    return False
+
+def set_trigger():
+    if use_db():
+        _db_set(_TRIGGER_KEY, True)
+
+def clear_trigger():
+    if use_db():
+        _db_set(_TRIGGER_KEY, False)
+
+
+# ── Agent status ──────────────────────────────────────────────────────────────
+
+def save_status(data: dict):
+    if use_db():
+        existing = _db_get(_STATUS_KEY) or {}
+        existing.update(data)
+        _db_set(_STATUS_KEY, existing)
+
+def load_status() -> dict:
+    if use_db():
+        return _db_get(_STATUS_KEY) or {}
+    return {}
