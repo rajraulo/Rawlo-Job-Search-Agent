@@ -433,23 +433,37 @@ def config_page():
 </div>
 
 <div class="card">
-  <h3>🔗 LinkedIn Credentials</h3>
+  <h3>🔗 LinkedIn Credentials <span style="font-size:12px;font-weight:500;color:#64748b;margin-left:8px">— Optional</span></h3>
 
-  <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:18px;margin-bottom:20px">
-    <div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:12px">
-      <span style="font-size:22px;line-height:1">🔒</span>
-      <div>
-        <div style="font-weight:700;color:#e2e8f0;font-size:14px;margin-bottom:4px">Your credentials are safe</div>
-        <div style="color:#94a3b8;font-size:13px;line-height:1.6">
-          Everything you enter here is stored in your own private Neon PostgreSQL database over an encrypted SSL connection.
-          Your credentials are <strong style="color:#e2e8f0">never logged, never shared, and never visible</strong> after saving —
-          password fields show a placeholder instead of the real value.
-          The <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">li_at</code> cookie
-          is only used to submit Easy Apply forms on LinkedIn on your behalf,
-          the same way LinkedIn's own mobile apps authenticate.
-          You can revoke access anytime by logging out of LinkedIn in that browser.
-        </div>
+  <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:18px;margin-bottom:16px">
+    <div style="font-weight:700;color:#e2e8f0;font-size:13px;margin-bottom:10px">❓ Why is li_at needed?</div>
+    <div style="color:#94a3b8;font-size:13px;line-height:1.7;margin-bottom:14px">
+      <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">li_at</code> is
+      <strong style="color:#e2e8f0">only used for one thing</strong> — automatically clicking
+      <strong style="color:#e2e8f0">Easy Apply</strong> on LinkedIn. LinkedIn has no public API for job applications,
+      so the agent uses a headless browser (Selenium) to open the job page and submit the form as you.
+      The <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">li_at</code> cookie
+      is your LinkedIn login session — it proves to LinkedIn that the browser is you.
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+      <div style="background:#22c55e11;border:1px solid #22c55e33;border-radius:8px;padding:12px">
+        <div style="color:#22c55e;font-weight:700;margin-bottom:6px">✅ Works without li_at</div>
+        <div style="color:#94a3b8;line-height:1.7">Search LinkedIn for jobs<br>Score &amp; filter results<br>Tailor resume with AI<br>Send approval emails</div>
       </div>
+      <div style="background:#0ea5e911;border:1px solid #0ea5e933;border-radius:8px;padding:12px">
+        <div style="color:#0ea5e9;font-weight:700;margin-bottom:6px">🚀 Also works with li_at</div>
+        <div style="color:#94a3b8;line-height:1.7">Auto-submit Easy Apply<br>Upload tailored resume<br>Fill application forms<br><span style="color:#64748b">(external URLs still manual)</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:14px 18px;margin-bottom:16px;display:flex;gap:10px;align-items:flex-start">
+    <span style="font-size:18px;line-height:1.4">🔒</span>
+    <div style="color:#94a3b8;font-size:13px;line-height:1.6">
+      <strong style="color:#e2e8f0">Your credentials are safe.</strong>
+      Stored in your own private Neon database over encrypted SSL —
+      never logged, never shared, never visible after saving.
+      Revoke anytime by logging out of LinkedIn in that browser.
     </div>
   </div>
 
