@@ -242,18 +242,17 @@ def step_apply():
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def check_env():
-    required = {
-        "ANTHROPIC_API_KEY": "Claude AI key (for resume tailoring)",
-        "SMTP_USER":         "Gmail address (for approval emails)",
-        "SMTP_PASSWORD":     "Gmail App Password",
+    """Warn about missing credentials but don't exit — they may be set in Neon config."""
+    optional_warn = {
+        "ANTHROPIC_API_KEY": "Claude AI key (resume tailoring will be disabled)",
+        "SMTP_USER":         "Gmail address (email notifications will be disabled)",
+        "SMTP_PASSWORD":     "Gmail App Password (email notifications will be disabled)",
     }
-    missing = [k for k in required if not os.getenv(k)]
-    if missing:
-        for k in missing:
-            logger.error(f"Missing env var: {k} — {required[k]}")
-        sys.exit(1)
+    for k, hint in optional_warn.items():
+        if not os.getenv(k):
+            logger.warning(f"{k} not set — {hint}. Add it in the web app Configuration page.")
     if not os.getenv("LI_AT"):
-        logger.warning("LI_AT not set — LinkedIn Easy Apply will be disabled.")
+        logger.warning("LI_AT not set — LinkedIn Easy Apply disabled.")
 
 
 def _build_docx_from_text(job: dict) -> Path | None:
@@ -346,6 +345,8 @@ def main():
     parser.add_argument("--once", action="store_true", help="Run pipeline once and exit")
     args = parser.parse_args()
 
+    # Load credentials from Neon first so check_env sees them
+    _apply_credentials()
     check_env()
     run_once()  # always run immediately on start
 
