@@ -221,6 +221,13 @@ def step_apply():
     agent = ApplicationAgent()
 
     for job in approved2:
+        # If tailored via web UI (text stored but no .docx), build the .docx now
+        if job.get("tailored_resume_text") and not job.get("tailored_resume"):
+            docx_path = _build_docx_from_text(job)
+            if docx_path:
+                _update_job(job["id"], tailored_resume=str(docx_path))
+                job = {**job, "tailored_resume": str(docx_path)}
+
         logger.info(f"  🚀 Applying: {job['title']} @ {job['company']}")
         ok = agent.apply(job)
         _update_job(
@@ -247,6 +254,22 @@ def check_env():
         sys.exit(1)
     if not os.getenv("LI_AT"):
         logger.warning("LI_AT not set — LinkedIn Easy Apply will be disabled.")
+
+
+def _build_docx_from_text(job: dict) -> Path | None:
+    """Convert AI-tailored resume text (from web UI) into a .docx for application."""
+    try:
+        from resume_tailor import TAILORED_DIR, write_tailored_docx
+        import re
+        safe_co    = re.sub(r"[^\w\-]", "_", job.get("company", "Co"))
+        safe_title = re.sub(r"[^\w\-]", "_", job.get("title", "Role"))[:30]
+        path = TAILORED_DIR / f"{safe_title}_{safe_co}_{job['id'][:8]}.docx"
+        if not path.exists():
+            write_tailored_docx(job["tailored_resume_text"], job, path)
+        return path
+    except Exception as e:
+        logger.warning(f"Could not build .docx from tailored text: {e}")
+        return None
 
 
 def _sync_resume_from_db():

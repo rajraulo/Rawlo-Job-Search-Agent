@@ -106,6 +106,7 @@ kbd{font-family:monospace}
 @media(max-width:700px){.two-col{grid-template-columns:1fr}}
 .schedule-panel{background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:20px;margin-top:12px;display:none}
 .schedule-panel.open{display:block}
+.active-tab{color:#e2e8f0 !important;border-bottom-color:#6366f1 !important}
 """
 
 NAV = """<nav>
@@ -171,20 +172,29 @@ def _update(field, val, status):
             break
     save_jobs(jobs)
 
+_TERMINAL = {"applied", "skipped", "declined_stage2", "apply_failed"}
+
 def _action_btns(job):
-    s = job.get("status", "")
+    s    = job.get("status", "")
     aid  = job.get("approval_id", "")
     aid2 = job.get("approval2_id", "")
     url  = job.get("apply_url", "")
+    jid  = job.get("id", "")
+
+    apply_btn = f'<a href="/apply/{jid}" class="btn btn-purple btn-sm">✏️ Apply</a>'
+
+    if s in _TERMINAL:
+        if url: return f'<a href="{url}" target="_blank" class="btn btn-gray btn-sm">View ↗</a>'
+        return ""
     if s == "pending_stage1":
-        return (f'<a href="/approve1/{aid}" class="btn btn-green btn-sm">✅ Approve</a> '
-                f'<a href="/skip/{aid}" class="btn btn-gray btn-sm">Skip</a>')
+        return (f'<a href="/approve1/{aid}" class="btn btn-green btn-sm">✅</a> '
+                f'<a href="/skip/{aid}" class="btn btn-gray btn-sm">Skip</a> '
+                f'{apply_btn}')
     if s == "pending_stage2":
-        return (f'<a href="/approve2/{aid2}" class="btn btn-purple btn-sm">🚀 Apply</a> '
-                f'<a href="/decline2/{aid2}" class="btn btn-red btn-sm">Decline</a>')
-    if url:
-        return f'<a href="{url}" target="_blank" class="btn btn-gray btn-sm">View ↗</a>'
-    return ""
+        return (f'<a href="/approve2/{aid2}" class="btn btn-blue btn-sm">🚀</a> '
+                f'<a href="/decline2/{aid2}" class="btn btn-red btn-sm">✗</a> '
+                f'{apply_btn}')
+    return apply_btn
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -399,7 +409,13 @@ def search_page():
     if not rows:
         rows = '<tr><td colspan="7" class="empty">No jobs yet — click <b>Search Now</b> to start.</td></tr>'
 
-    pending_banner = ""
+    applied_flash = ""
+    if request.args.get("applied"):
+        applied_flash = """<div class="flash flash-ok" style="margin-bottom:20px">
+          🚀 Job queued for application! The local orchestrator will apply within the next scheduled run.
+        </div>"""
+
+    pending_banner = applied_flash
     auto_refresh   = ""
     if pending:
         pending_banner = """<div style="background:#f59e0b22;border:1px solid #f59e0b44;border-radius:10px;
@@ -577,6 +593,7 @@ def config_page():
                 "li_at":             keep("li_at",             creds.get("li_at","")),
                 "li_user_email":     keep("li_user_email",     creds.get("li_user_email","")),
                 "li_user_phone":     keep("li_user_phone",     creds.get("li_user_phone","")),
+                "anthropic_api_key": keep("anthropic_api_key", creds.get("anthropic_api_key","")),
             }
             save_config(cfg)
             creds = cfg["credentials"]
@@ -671,6 +688,18 @@ def config_page():
       <label>SMTP Port</label>
       <input type="number" name="smtp_port" value="{creds.get('smtp_port',587)}">
     </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>🤖 AI Resume Tailoring</h3>
+  <label>Anthropic API Key {dot('anthropic_api_key')}</label>
+  <input type="password" name="anthropic_api_key"
+         placeholder="{'Leave blank to keep existing' if creds.get('anthropic_api_key') else 'sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx'}">
+  <div class="hint">
+    Required for AI-powered resume tailoring. Get your key at
+    <a href="https://console.anthropic.com" target="_blank" style="color:#0ea5e9">console.anthropic.com</a>.
+    Used when you click "Tailor Resume with AI" on the Apply page.
   </div>
 </div>
 
@@ -806,6 +835,260 @@ def config_page():
 </form>"""
 
     return _page("c", html, "Configuration")
+
+
+# ── Apply flow ────────────────────────────────────────────────────────────────
+
+_TAILOR_SYSTEM = """You are an expert resume writer specializing in DevOps, Cloud, and Automation roles.
+Tailor the candidate's resume to closely match the job description.
+
+Rules:
+1. ONLY modify: Professional Summary, Skills section, Experience bullet points.
+2. NEVER change: name, contact info, education, certifications, company names, job titles, dates.
+3. Mirror the language and keywords from the job description naturally — no keyword stuffing.
+4. Keep bullet points concise, action-verb-led, and quantified where possible.
+5. Return ONLY the complete tailored resume text, preserving the same section structure.
+6. Do not add new sections that don't exist in the original."""
+
+
+def _get_anthropic_key() -> str:
+    creds = load_config().get("credentials", {})
+    return (creds.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY", "")).strip()
+
+
+def _find_job_by_id(job_id: str) -> dict | None:
+    return next((j for j in load_jobs() if j.get("id") == job_id), None)
+
+
+def _update_job_by_id(job_id: str, **updates):
+    jobs = load_jobs()
+    for j in jobs:
+        if j.get("id") == job_id:
+            j.update(updates)
+            j["status_updated_at"] = datetime.utcnow().isoformat()
+            break
+    save_jobs(jobs)
+
+
+@app.route("/apply/<job_id>")
+def apply_page(job_id):
+    from storage import ats_score, load_resume
+    job = _find_job_by_id(job_id)
+    if not job:
+        return redirect("/search")
+
+    resume      = load_resume()
+    orig_text   = resume.get("text", "")
+    resume_name = resume.get("filename", "No resume uploaded")
+    tailored    = job.get("tailored_resume_text", "")
+    has_key     = bool(_get_anthropic_key())
+
+    orig_ats    = ats_score(orig_text,  job) if orig_text  else 0
+    tail_ats    = ats_score(tailored,   job) if tailored   else 0
+
+    flash = request.args.get("flash", "")
+    flash_html = ""
+    if flash == "tailored":
+        flash_html = '<div class="flash flash-ok" style="margin-bottom:20px">✅ Resume tailored with AI. Review below before applying.</div>'
+    elif flash == "nokey":
+        flash_html = '<div class="flash flash-err" style="margin-bottom:20px">❌ Anthropic API key not set. Add it in Configuration → Credentials.</div>'
+    elif flash == "noresume":
+        flash_html = '<div class="flash flash-err" style="margin-bottom:20px">❌ No resume found. Upload your resume on the Search page first.</div>'
+
+    # Build resume tabs
+    tab_js = """<script>
+function showTab(t){
+  document.querySelectorAll('.rtab').forEach(e=>e.classList.remove('active-tab'));
+  document.querySelectorAll('.rcontent').forEach(e=>e.style.display='none');
+  document.getElementById('tab-'+t).classList.add('active-tab');
+  document.getElementById('rc-'+t).style.display='block';
+}
+</script>"""
+
+    tabs = ""
+    if tailored:
+        tabs = f"""<div style="display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid #334155">
+  <button id="tab-orig" class="rtab" onclick="showTab('orig')"
+    style="background:none;border:none;border-bottom:2px solid transparent;padding:8px 18px;
+           color:#94a3b8;font-weight:600;cursor:pointer;font-size:13px">
+    Original <span style="font-size:11px;color:#64748b">({orig_ats}% ATS)</span>
+  </button>
+  <button id="tab-tail" class="rtab active-tab" onclick="showTab('tail')"
+    style="background:none;border:none;border-bottom:2px solid #6366f1;padding:8px 18px;
+           color:#e2e8f0;font-weight:600;cursor:pointer;font-size:13px">
+    ✨ AI Tailored <span style="font-size:11px;color:#22c55e">(+{max(0,tail_ats-orig_ats)}% → {tail_ats}% ATS)</span>
+  </button>
+</div>
+<div id="rc-orig" class="rcontent" style="display:none">
+  <pre style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:16px;
+              font-size:12px;line-height:1.8;color:#94a3b8;overflow-y:auto;max-height:420px;
+              white-space:pre-wrap;font-family:'Segoe UI',sans-serif">{orig_text[:6000] if orig_text else 'No resume uploaded yet.'}</pre>
+</div>
+<div id="rc-tail" class="rcontent">
+  <pre style="background:#0f172a;border:1px solid #6366f144;border-radius:8px;padding:16px;
+              font-size:12px;line-height:1.8;color:#c4b5fd;overflow-y:auto;max-height:420px;
+              white-space:pre-wrap;font-family:'Segoe UI',sans-serif">{tailored[:6000]}</pre>
+</div>"""
+    else:
+        tabs = f"""<pre style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:16px;
+             font-size:12px;line-height:1.8;color:#94a3b8;overflow-y:auto;max-height:420px;
+             white-space:pre-wrap;font-family:'Segoe UI',sans-serif">{orig_text[:6000] if orig_text else 'No resume uploaded. Go to Search page to upload your resume.'}</pre>"""
+
+    # ATS comparison bar
+    ats_display = ""
+    if orig_text:
+        if tailored:
+            ats_display = f"""<div style="display:flex;gap:24px;margin-bottom:16px;flex-wrap:wrap">
+  <div><div style="font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;margin-bottom:4px">Original ATS</div>
+    {_ats_pill(orig_ats)}{_ats_bar(orig_ats)}</div>
+  <div style="display:flex;align-items:center;font-size:18px;color:#334155">→</div>
+  <div><div style="font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;margin-bottom:4px">Tailored ATS</div>
+    {_ats_pill(tail_ats)}{_ats_bar(tail_ats)}</div>
+  <div style="display:flex;align-items:center;font-size:20px">
+    {'🚀' if tail_ats > orig_ats else '↔️'}
+  </div>
+</div>"""
+        else:
+            ats_display = f"""<div style="margin-bottom:12px">
+  <div style="font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;margin-bottom:4px">Current ATS Match</div>
+  {_ats_pill(orig_ats)}{_ats_bar(orig_ats)}
+</div>"""
+
+    # Tailor button or no-key warning
+    tailor_section = ""
+    if not has_key:
+        tailor_section = """<div style="background:#f59e0b11;border:1px solid #f59e0b33;border-radius:8px;
+             padding:12px 16px;font-size:13px;color:#f59e0b;margin-bottom:16px">
+  ⚠️ Set your <strong>Anthropic API Key</strong> in Configuration → Credentials to enable AI tailoring.
+</div>"""
+    else:
+        tailor_section = f"""<form method="POST" action="/apply/{job_id}/tailor" id="tailor-form">
+  <button type="submit" class="btn btn-purple" style="width:100%;justify-content:center;padding:11px"
+          onclick="this.disabled=true;this.innerHTML='🤖 Tailoring… (10–20s)';this.form.submit()">
+    🤖 {'Re-tailor' if tailored else 'Tailor'} Resume with AI
+  </button>
+</form>"""
+
+    # Confirm button
+    confirm_section = f"""<form method="POST" action="/apply/{job_id}/confirm" style="margin-top:12px">
+  <input type="hidden" name="use_tailored" value="{'1' if tailored else '0'}">
+  <button type="submit" class="btn btn-green" style="width:100%;justify-content:center;padding:13px;font-size:14px"
+          onclick="this.disabled=true;this.innerHTML='⏳ Queued…'">
+    ✅ Confirm &amp; Apply {'with Tailored Resume' if tailored else '(original resume)'}
+  </button>
+</form>
+<p style="text-align:center;font-size:12px;color:#475569;margin-top:8px">
+  The local orchestrator will apply via LinkedIn Easy Apply within the next scheduled run.
+</p>"""
+
+    jsc = job.get("relevance_score", 0)
+    desc = (job.get("description") or "")[:2000].replace("<","&lt;")
+
+    html = f"""
+{flash_html}
+<div style="margin-bottom:20px">
+  <a href="/search" style="color:#64748b;font-size:13px;text-decoration:none">← Back to Search</a>
+</div>
+
+<div style="margin-bottom:24px">
+  <h2 style="margin-bottom:6px">{job.get('title','')}</h2>
+  <div style="color:#0ea5e9;font-size:15px;font-weight:600;margin-bottom:12px">{job.get('company','')}</div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:#94a3b8;align-items:center">
+    <span>📍 {job.get('location','')}</span>
+    <span>🗓️ {job.get('date_posted','N/A')}</span>
+    <span class="score-pill {'pill-green' if jsc>=70 else 'pill-yellow' if jsc>=40 else 'pill-red'}">⭐ {jsc}% job match</span>
+    {_badge(job.get('status',''))}
+    {'<a href="'+job.get('apply_url','')+ '" target="_blank" class="btn btn-gray btn-sm">View on LinkedIn ↗</a>' if job.get('apply_url') else ''}
+  </div>
+</div>
+
+<div class="two-col" style="align-items:flex-start;gap:20px">
+
+  <!-- Left: Job description -->
+  <div class="card" style="margin-bottom:0">
+    <h3>📋 Job Description</h3>
+    <pre style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:16px;
+               font-size:12px;line-height:1.8;color:#94a3b8;overflow-y:auto;max-height:480px;
+               white-space:pre-wrap;font-family:'Segoe UI',sans-serif">{desc}</pre>
+  </div>
+
+  <!-- Right: Resume + actions -->
+  <div>
+    <div class="card" style="margin-bottom:16px">
+      <h3>📄 Your Resume
+        <span style="font-size:12px;color:#64748b;font-weight:500;margin-left:8px">{resume_name}</span>
+      </h3>
+      {ats_display}
+      {tabs}
+    </div>
+
+    <div class="card" style="margin-bottom:0">
+      <h3>⚡ Actions</h3>
+      {tailor_section}
+      {confirm_section}
+    </div>
+  </div>
+</div>
+{tab_js}"""
+
+    return _page("s", html, f"Apply — {job.get('title','')}")
+
+
+@app.route("/apply/<job_id>/tailor", methods=["POST"])
+def tailor_for_job(job_id):
+    from storage import load_resume, ats_score
+    job = _find_job_by_id(job_id)
+    if not job:
+        return redirect("/search")
+
+    api_key = _get_anthropic_key()
+    if not api_key:
+        return redirect(f"/apply/{job_id}?flash=nokey")
+
+    resume = load_resume()
+    resume_text = resume.get("text", "")
+    if not resume_text:
+        return redirect(f"/apply/{job_id}?flash=noresume")
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system=_TAILOR_SYSTEM,
+            messages=[{"role": "user", "content":
+                f"## Job Title: {job.get('title','')}\n"
+                f"## Company: {job.get('company','')}\n"
+                f"## Location: {job.get('location','')}\n\n"
+                f"## Job Description:\n{(job.get('description') or '')[:4000]}\n\n"
+                f"## Current Resume:\n{resume_text}"}],
+        )
+        tailored_text = msg.content[0].text
+        _update_job_by_id(job_id, tailored_resume_text=tailored_text)
+    except Exception as e:
+        logger.error(f"AI tailoring failed: {e}")
+
+    return redirect(f"/apply/{job_id}?flash=tailored")
+
+
+@app.route("/apply/<job_id>/confirm", methods=["POST"])
+def confirm_apply(job_id):
+    job = _find_job_by_id(job_id)
+    if not job:
+        return redirect("/search")
+
+    use_tailored = request.form.get("use_tailored") == "1"
+    updates = {
+        "status":           "approved_stage2",
+        "apply_source":     "web_ui",
+        "use_tailored":     use_tailored,
+    }
+    if not use_tailored:
+        updates["tailored_resume_text"] = ""
+
+    _update_job_by_id(job_id, **updates)
+    return redirect("/search?applied=1")
 
 
 # ── Approval email routes ─────────────────────────────────────────────────────
