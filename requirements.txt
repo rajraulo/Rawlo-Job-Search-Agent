@@ -17,6 +17,7 @@ python-docx>=1.1.0             # Read/write .docx files
 # ── Approval Server ───────────────────────────────────────────────────────────
 flask>=3.0.0                   # Lightweight approval server
 psycopg2-binary>=2.9.9         # Neon PostgreSQL (shared job storage)
+bcrypt>=4.0.0                  # Password hashing for user accounts
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 requests>=2.31.0               # HTTP requests (if needed)
