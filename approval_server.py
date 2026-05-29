@@ -94,24 +94,38 @@ textarea{resize:vertical;min-height:110px}
 details[open] summary span{transform:rotate(90deg);display:inline-block}
 details summary::-webkit-details-marker{display:none}
 kbd{font-family:monospace}
+.upload-zone{border:2px dashed #334155;border-radius:12px;padding:32px;text-align:center;cursor:pointer;transition:border-color .2s;background:#0f172a}
+.upload-zone:hover,.upload-zone.drag{border-color:#0ea5e9;background:#0ea5e908}
+.upload-zone input{display:none}
+.ats-bar{height:8px;border-radius:4px;background:#1e293b;overflow:hidden;margin-top:4px}
+.ats-fill{height:100%;border-radius:4px;transition:width .4s}
+.ats-green{background:#22c55e}.ats-yellow{background:#f59e0b}.ats-red{background:#ef4444}
+.score-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:700}
+.pill-green{background:#22c55e22;color:#22c55e}.pill-yellow{background:#f59e0b22;color:#f59e0b}.pill-red{background:#ef444422;color:#ef4444}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:700px){.two-col{grid-template-columns:1fr}}
+.schedule-panel{background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:20px;margin-top:12px;display:none}
+.schedule-panel.open{display:block}
 """
 
 NAV = """<nav>
   <span class="brand">🤖 Job Agent</span>
   <a href="/" class="{d}">Dashboard</a>
-  <a href="/jobs" class="{j}">Jobs</a>
+  <a href="/search" class="{s}">Search &amp; Results</a>
+  <a href="/jobs" class="{j}">All Jobs</a>
   <a href="/config" class="{c}">Configuration</a>
 </nav>"""
 
-def _page(active, content, title="Job Agent"):
+def _page(active, content, title="Job Agent", extra_head=""):
     nav = NAV.format(
         d="active" if active == "d" else "",
+        s="active" if active == "s" else "",
         j="active" if active == "j" else "",
         c="active" if active == "c" else "",
     )
     return render_template_string(f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title}</title><style>{CSS}</style></head>
+<title>{title}</title><style>{CSS}</style>{extra_head}</head>
 <body>{nav}<div class="page">{content}</div></body></html>""")
 
 
@@ -300,6 +314,234 @@ def jobs_page():
 <tbody>{rows}</tbody></table></div>"""
 
     return _page("j", html, "Jobs")
+
+
+# ── Search & Results ──────────────────────────────────────────────────────────
+
+def _ats_pill(score: int) -> str:
+    if score >= 70:
+        return f'<span class="score-pill pill-green">🟢 {score}%</span>'
+    if score >= 40:
+        return f'<span class="score-pill pill-yellow">🟡 {score}%</span>'
+    return f'<span class="score-pill pill-red">🔴 {score}%</span>'
+
+def _ats_bar(score: int) -> str:
+    cls = "ats-green" if score >= 70 else "ats-yellow" if score >= 40 else "ats-red"
+    return f'<div class="ats-bar"><div class="ats-fill {cls}" style="width:{score}%"></div></div>'
+
+def _extract_text(file_bytes: bytes, filename: str) -> str:
+    import io
+    if filename.lower().endswith(".pdf"):
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(io.BytesIO(file_bytes))
+            return "\n".join(p.extract_text() or "" for p in reader.pages)
+        except Exception as e:
+            raise ValueError(f"Could not read PDF: {e}")
+    elif filename.lower().endswith(".docx"):
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception as e:
+            raise ValueError(f"Could not read DOCX: {e}")
+    raise ValueError("Only PDF and DOCX files are supported.")
+
+
+@app.route("/search")
+def search_page():
+    from storage import ats_score, load_resume, get_trigger
+    cfg      = load_config()
+    resume   = load_resume()
+    jobs     = load_jobs()
+    status   = load_status()
+    pending  = get_trigger()
+
+    resume_text = resume.get("text", "")
+    resume_name = resume.get("filename", "")
+    resume_time = resume.get("uploaded_at", "")
+
+    schedule_min = cfg.get("schedule_minutes", 10)
+    last_run     = status.get("last_run", "")
+
+    # Sort jobs by ATS score if resume available, else by relevance
+    def _job_sort(j):
+        s = ats_score(resume_text, j) if resume_text else j.get("relevance_score", 0)
+        return -s
+    jobs_sorted = sorted(jobs, key=_job_sort)
+
+    # Build rows
+    rows = ""
+    for job in jobs_sorted:
+        ats = ats_score(resume_text, job) if resume_text else None
+        jsc = job.get("relevance_score", 0)
+        jsc_cls = "pill-green" if jsc >= 70 else "pill-yellow" if jsc >= 40 else "pill-red"
+        ats_col = (
+            f'{_ats_pill(ats)}{_ats_bar(ats)}'
+            if ats is not None else
+            '<span style="color:#475569;font-size:12px">Upload resume</span>'
+        )
+        rows += f"""<tr>
+          <td>
+            <div style="font-weight:600;color:#f1f5f9">
+              {'<a href="'+job.get('apply_url','')+ '" target="_blank" style="color:#f1f5f9">'+job.get('title','')+'</a>' if job.get('apply_url') else job.get('title','')}
+            </div>
+            <div style="color:#64748b;font-size:12px">{job.get('company','')}</div>
+          </td>
+          <td style="color:#94a3b8;font-size:12px">{job.get('location','')}</td>
+          <td style="color:#64748b;font-size:12px">{job.get('date_posted','—')}</td>
+          <td><span class="score-pill {jsc_cls}">{jsc}%</span></td>
+          <td style="min-width:110px">{ats_col}</td>
+          <td>{_badge(job.get('status',''))}</td>
+          <td>{_action_btns(job)}</td>
+        </tr>"""
+
+    if not rows:
+        rows = '<tr><td colspan="7" class="empty">No jobs yet — click <b>Search Now</b> to start.</td></tr>'
+
+    pending_banner = ""
+    auto_refresh   = ""
+    if pending:
+        pending_banner = """<div style="background:#f59e0b22;border:1px solid #f59e0b44;border-radius:10px;
+            padding:14px 18px;margin-bottom:20px;display:flex;gap:10px;align-items:center">
+          <span style="font-size:20px">⏳</span>
+          <div>
+            <strong style="color:#f59e0b">Search in progress…</strong>
+            <span style="color:#94a3b8;font-size:13px;margin-left:8px">
+              The local orchestrator is running. This page will refresh automatically.
+            </span>
+          </div>
+        </div>"""
+        auto_refresh = '<script>setTimeout(()=>location.reload(),15000)</script>'
+
+    resume_section = f"""
+<div class="card" style="margin-bottom:24px">
+  <h3 style="margin-bottom:16px">📄 Your Resume
+    {'<span style="font-size:12px;color:#22c55e;font-weight:500;margin-left:8px">✅ '+resume_name+' &nbsp;·&nbsp; uploaded '+_ago(resume_time)+'</span>' if resume_name else
+     '<span style="font-size:12px;color:#64748b;font-weight:500;margin-left:8px">Not uploaded yet</span>'}
+  </h3>
+  <form method="POST" action="/upload-resume" enctype="multipart/form-data" id="upload-form">
+    <label for="resume-file" class="upload-zone" id="drop-zone">
+      <input type="file" name="resume" id="resume-file" accept=".pdf,.docx"
+             onchange="document.getElementById('upload-form').submit()">
+      <div style="font-size:36px;margin-bottom:10px">{'📄' if resume_name else '📁'}</div>
+      <div style="color:#e2e8f0;font-weight:600;margin-bottom:4px">
+        {'Replace resume — drag & drop or click to browse' if resume_name else 'Upload your resume — drag & drop or click to browse'}
+      </div>
+      <div style="color:#64748b;font-size:13px">Supports PDF and DOCX · Auto-uploads on selection</div>
+    </label>
+  </form>
+  {('<div style="margin-top:12px;padding:12px 16px;background:#0f172a;border-radius:8px;font-size:13px;color:#94a3b8">'
+   '📊 ATS scores in the table below compare your resume against each job description in real time.</div>') if resume_name else ''}
+</div>"""
+
+    html = f"""
+{pending_banner}
+<div class="two-col" style="margin-bottom:20px;align-items:flex-start">
+  <div>
+    <h2 style="margin-bottom:16px">Search &amp; Results</h2>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+      <form method="POST" action="/trigger" style="margin:0">
+        <button type="submit" class="btn btn-orange" style="font-size:14px;padding:10px 22px"
+                {'disabled style="opacity:.5"' if pending else ''}>
+          {'⏳ Searching…' if pending else '🔍 Search Now'}
+        </button>
+      </form>
+      <button onclick="document.getElementById('sched-panel').classList.toggle('open')"
+              class="btn btn-gray" style="font-size:14px;padding:10px 22px" type="button">
+        📅 Schedule Search
+      </button>
+    </div>
+    <div class="schedule-panel" id="sched-panel">
+      <div style="font-weight:700;color:#e2e8f0;margin-bottom:12px">⚙️ Schedule Configuration</div>
+      <form method="POST" action="/save-schedule" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+        <div>
+          <label style="display:block;font-size:11px;color:#64748b;font-weight:700;
+                        text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">
+            Run every
+          </label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="number" name="minutes" value="{schedule_min}" min="5" max="1440"
+                   style="width:90px;background:#1e293b;border:1px solid #334155;border-radius:7px;
+                          color:#e2e8f0;padding:8px 12px;font-size:14px;outline:none">
+            <span style="color:#94a3b8;font-size:14px">minutes</span>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-blue">Save Schedule</button>
+      </form>
+      <div style="margin-top:12px;font-size:12px;color:#475569">
+        Last run: {_ago(last_run) if last_run else 'Never'} &nbsp;·&nbsp;
+        Next run: within {schedule_min} min of orchestrator polling &nbsp;·&nbsp;
+        Restart orchestrator to apply new interval.
+      </div>
+    </div>
+  </div>
+  <div>{resume_section}</div>
+</div>
+
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+  <div style="font-size:14px;color:#64748b">{len(jobs)} job(s) found
+    {' · sorted by ATS match' if resume_text else ' · upload resume for ATS comparison'}
+  </div>
+</div>
+
+<div class="wrap"><table>
+<thead><tr>
+  <th>Job</th><th>Location</th><th>Posted</th>
+  <th>Job Score</th>
+  <th>{'📄 ATS Match' if resume_text else 'ATS Match'}</th>
+  <th>Status</th><th>Action</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table></div>
+
+<script>
+const zone = document.getElementById('drop-zone');
+if(zone){{
+  zone.addEventListener('dragover', e=>{{e.preventDefault();zone.classList.add('drag')}});
+  zone.addEventListener('dragleave', ()=>zone.classList.remove('drag'));
+  zone.addEventListener('drop', e=>{{
+    e.preventDefault(); zone.classList.remove('drag');
+    const f = e.dataTransfer.files[0];
+    if(f){{ const dt = new DataTransfer(); dt.items.add(f);
+            document.getElementById('resume-file').files = dt.files;
+            document.getElementById('upload-form').submit(); }}
+  }});
+}}
+</script>
+{auto_refresh}"""
+
+    return _page("s", html, "Search & Results")
+
+
+@app.route("/upload-resume", methods=["POST"])
+def upload_resume():
+    import base64
+    from storage import save_resume
+    f = request.files.get("resume")
+    if not f or not f.filename:
+        return redirect("/search")
+    raw  = f.read()
+    name = f.filename
+    try:
+        text = _extract_text(raw, name)
+        b64  = base64.b64encode(raw).decode()
+        save_resume(text, name, b64)
+    except ValueError as e:
+        pass  # silently continue — could show flash
+    return redirect("/search")
+
+
+@app.route("/save-schedule", methods=["POST"])
+def save_schedule():
+    try:
+        minutes = max(5, int(request.form.get("minutes", 10)))
+        cfg = load_config()
+        cfg["schedule_minutes"] = minutes
+        save_config(cfg)
+    except Exception:
+        pass
+    return redirect("/search")
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────

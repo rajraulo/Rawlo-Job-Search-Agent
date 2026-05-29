@@ -16,6 +16,7 @@ _JOBS_KEY    = "agent_jobs"
 _CONFIG_KEY  = "agent_config"
 _TRIGGER_KEY = "run_trigger"
 _STATUS_KEY  = "agent_status"
+_RESUME_KEY  = "user_resume"
 _ROOT        = Path(__file__).resolve().parent
 
 
@@ -169,3 +170,70 @@ def load_status() -> dict:
     if use_db():
         return _db_get(_STATUS_KEY) or {}
     return {}
+
+
+# ── Resume ────────────────────────────────────────────────────────────────────
+
+def save_resume(text: str, filename: str, base64_data: str):
+    from datetime import datetime as _dt
+    _db_set(_RESUME_KEY, {
+        "text":        text,
+        "filename":    filename,
+        "base64":      base64_data,
+        "uploaded_at": _dt.utcnow().isoformat(),
+    })
+
+def load_resume() -> dict:
+    if use_db():
+        return _db_get(_RESUME_KEY) or {}
+    # fallback: read local base resume
+    local = _ROOT / "data" / "resumes" / "base_resume.docx"
+    if local.exists():
+        try:
+            from docx import Document
+            doc = Document(str(local))
+            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            return {"text": text, "filename": "base_resume.docx", "uploaded_at": ""}
+        except Exception:
+            pass
+    return {}
+
+
+# ── ATS Scoring ───────────────────────────────────────────────────────────────
+
+def ats_score(resume_text: str, job: dict) -> int:
+    """
+    Calculate ATS compatibility: what % of meaningful job keywords
+    appear in the resume. Returns 0-100.
+    """
+    import re
+    if not resume_text or not job.get("description"):
+        return 0
+
+    stop = {
+        "the","and","for","are","this","that","with","have","from","they",
+        "will","your","been","more","when","than","which","their","would",
+        "about","could","should","these","those","also","into","over",
+        "work","team","role","you","our","who","must","can","may","has",
+        "its","all","any","but","not","we","or","in","of","to","a","an",
+        "is","it","be","as","at","so","if","on","do","by","he","she",
+        "was","had","his","her","they","we","you","i",
+    }
+
+    resume_words = {
+        w for w in re.findall(r"\b[a-zA-Z]{3,}\b", resume_text.lower())
+        if w not in stop
+    }
+
+    job_text  = f"{job.get('title','')} {job.get('description','')}"
+    job_words = {
+        w for w in re.findall(r"\b[a-zA-Z]{4,}\b", job_text.lower())
+        if w not in stop
+    }
+
+    if not job_words:
+        return 0
+
+    matches = resume_words & job_words
+    raw     = len(matches) / len(job_words)
+    return min(100, int(raw * 300))  # scale: 33% word overlap → 100 ATS

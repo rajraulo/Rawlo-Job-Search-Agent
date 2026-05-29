@@ -249,6 +249,21 @@ def check_env():
         logger.warning("LI_AT not set — LinkedIn Easy Apply will be disabled.")
 
 
+def _sync_resume_from_db():
+    """If a resume was uploaded via the web UI, download it to local disk for tailoring."""
+    from storage import load_resume, use_db
+    if not use_db():
+        return
+    resume = load_resume()
+    if not resume.get("base64"):
+        return
+    import base64
+    dest = ROOT / "data" / "resumes" / "base_resume.docx"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(base64.b64decode(resume["base64"]))
+    logger.info(f"Resume synced from Neon: {resume.get('filename','')}")
+
+
 def _apply_credentials():
     """Load credentials from Neon config and inject into env vars so all modules pick them up."""
     from storage import load_config, use_db
@@ -277,6 +292,7 @@ def run_once():
     logger.info("=" * 60)
     try:
         _apply_credentials()
+        _sync_resume_from_db()
         _sync_db_to_local()
 
         new_jobs = step_search()
