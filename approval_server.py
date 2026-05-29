@@ -232,11 +232,39 @@ def index():
     if not rows:
         rows = '<tr><td colspan="6" class="empty">No jobs yet — click <b>Search Now</b> or start the orchestrator locally.</td></tr>'
 
+    nodb_banner = ""
+    if request.args.get("err") == "nodb" or not use_db():
+        nodb_banner = """<div style="background:#ef444422;border:1px solid #ef444444;border-radius:10px;
+            padding:14px 18px;margin-bottom:16px;font-size:13px">
+          ⚠️ <strong style="color:#ef4444">Neon database not connected.</strong>
+          <span style="color:#94a3b8"> Go to your
+          <a href="https://vercel.com" target="_blank" style="color:#0ea5e9">Vercel dashboard</a>
+          → Storage → Create → Neon → link to this project.
+          Then pull env vars locally:
+          <code style="background:#1e293b;padding:1px 6px;border-radius:4px">vercel env pull .env.local</code>
+          and copy <code style="background:#1e293b;padding:1px 6px;border-radius:4px">DATABASE_URL</code> to your .env</span>
+        </div>"""
+
     trigger_notice = ""
     if triggered:
-        trigger_notice = '<div class="flash flash-ok" style="margin-bottom:16px">⏳ Search triggered — the local orchestrator will pick this up within 30 seconds.</div>'
+        trigger_notice = """<div style="background:#f59e0b22;border:1px solid #f59e0b44;border-radius:10px;
+            padding:14px 20px;margin-bottom:16px;display:flex;gap:12px;align-items:center">
+          <span style="font-size:20px">⏳</span>
+          <div style="flex:1">
+            <strong style="color:#f59e0b">Search pending…</strong>
+            <span style="color:#94a3b8;font-size:13px;margin-left:8px">
+              Waiting for the local orchestrator to pick this up. Make sure
+              <code style="background:#1e293b;padding:1px 6px;border-radius:4px">python orchestrator.py</code>
+              is running on your machine with <code style="background:#1e293b;padding:1px 6px;border-radius:4px">DATABASE_URL</code> set in .env
+            </span>
+          </div>
+          <form method="POST" action="/cancel-trigger" style="margin:0">
+            <button type="submit" class="btn btn-gray btn-sm">✕ Cancel</button>
+          </form>
+        </div>"""
 
     html = f"""
+{nodb_banner}
 {trigger_notice}
 <div class="row" style="margin-bottom:24px">
   <h2 style="margin:0;flex:1">Dashboard</h2>
@@ -281,6 +309,14 @@ def index():
 def trigger():
     if use_db():
         set_trigger()
+    else:
+        return redirect("/?err=nodb")
+    return redirect("/")
+
+
+@app.route("/cancel-trigger", methods=["POST"])
+def cancel_trigger():
+    clear_trigger()
     return redirect("/")
 
 
@@ -409,12 +445,28 @@ def search_page():
     if not rows:
         rows = '<tr><td colspan="7" class="empty">No jobs yet — click <b>Search Now</b> to start.</td></tr>'
 
-    applied_flash = ""
-    if request.args.get("applied"):
-        applied_flash = """<div class="flash flash-ok" style="margin-bottom:20px">
-          🚀 Job queued for application! The local orchestrator will apply within the next scheduled run.
-        </div>"""
+    banners = []
 
+    if request.args.get("applied"):
+        banners.append('<div class="flash flash-ok">🚀 Job queued! The orchestrator will apply within the next scheduled run.</div>')
+
+    if request.args.get("resume_ok"):
+        banners.append('<div class="flash flash-ok">✅ Resume uploaded successfully. ATS scores updated below.</div>')
+
+    resume_err = request.args.get("resume_err", "")
+    if resume_err:
+        banners.append(f'<div class="flash flash-err">❌ Resume upload failed: {resume_err.replace("+"," ")}</div>')
+
+    if not use_db():
+        banners.append("""<div style="background:#ef444422;border:1px solid #ef444444;border-radius:10px;
+            padding:14px 18px;font-size:13px">
+          ⚠️ <strong style="color:#ef4444">Database not connected.</strong>
+          <span style="color:#94a3b8"> Resume uploads and search triggers require Neon PostgreSQL.
+          Go to your <a href="https://vercel.com" target="_blank" style="color:#0ea5e9">Vercel dashboard</a>
+          → Storage → Create → Neon, then link it to this project.</span>
+        </div>""")
+
+    applied_flash = "\n".join(banners)
     pending_banner = applied_flash
     auto_refresh   = ""
     if pending:
@@ -536,16 +588,24 @@ def upload_resume():
     from storage import save_resume
     f = request.files.get("resume")
     if not f or not f.filename:
-        return redirect("/search")
+        return redirect("/search?resume_err=No+file+selected")
     raw  = f.read()
     name = f.filename
+    if not raw:
+        return redirect("/search?resume_err=File+is+empty")
+    if not use_db():
+        return redirect("/search?resume_err=Database+not+connected.+Set+DATABASE_URL+in+Vercel+environment+variables.")
     try:
         text = _extract_text(raw, name)
-        b64  = base64.b64encode(raw).decode()
+        if not text.strip():
+            return redirect("/search?resume_err=Could+not+extract+text.+Try+a+different+PDF+or+DOCX+file.")
+        b64 = base64.b64encode(raw).decode()
         save_resume(text, name, b64)
+        return redirect("/search?resume_ok=1")
     except ValueError as e:
-        pass  # silently continue — could show flash
-    return redirect("/search")
+        return redirect(f"/search?resume_err={str(e)[:120].replace(' ','+')}")
+    except Exception as e:
+        return redirect(f"/search?resume_err=Unexpected+error:+{str(e)[:80].replace(' ','+')}")
 
 
 @app.route("/save-schedule", methods=["POST"])
