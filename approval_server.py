@@ -860,17 +860,41 @@ function showTab(t){
     missing_email = not (creds.get("smtp_user") and creds.get("smtp_password"))
     missing_li    = not creds.get("li_at")
 
+    inp = 'width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none'
+    lbl = 'display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:12px'
+
+    email_html = ""
+    if missing_email:
+        email_html = (
+            '<label style="' + lbl + '">Your Email (notifications)</label>'
+            '<input type="email" name="approval_email" form="confirm-form" placeholder="you@gmail.com" required style="' + inp + '">'
+            '<label style="' + lbl + '">Gmail Address (sender)</label>'
+            '<input type="email" name="smtp_user" form="confirm-form" placeholder="sender@gmail.com" required style="' + inp + '">'
+            '<label style="' + lbl + '">Gmail App Password</label>'
+            '<input type="password" name="smtp_password" form="confirm-form" placeholder="xxxx xxxx xxxx xxxx" required style="' + inp + '">'
+            '<div style="font-size:11px;color:#475569;margin-top:3px">Not your Gmail password &mdash; '
+            '<a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:#0ea5e9">generate an App Password here</a></div>'
+        )
+
+    li_html = ""
+    if missing_li:
+        li_html = (
+            '<label style="' + lbl + '">LinkedIn Cookie (li_at) &nbsp;<span style="color:#475569;font-weight:400">optional &mdash; for Easy Apply</span></label>'
+            '<input type="password" name="li_at" form="confirm-form" placeholder="AQEDATxxxxxxxxxxxx" style="' + inp + '">'
+            '<div style="font-size:11px;color:#475569;margin-top:3px">'
+            'Chrome &rarr; linkedin.com &rarr; F12 &rarr; Application &rarr; Cookies &rarr; li_at &rarr; copy Value.'
+            '</div>'
+        )
+
     cred_fields = ""
     if missing_email or missing_li:
-        cred_fields = f"""
-<div style="background:#0f172a;border:1px solid #f59e0b44;border-radius:10px;padding:18px;margin-top:12px">
-  <div style="font-size:13px;font-weight:700;color:#f59e0b;margin-bottom:12px">
-    🔐 Required to apply — enter once, saved securely
-  </div>
-  {'<label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:12px">Your Email (for job alert notifications)</label><input type="email" name="approval_email" form="confirm-form" placeholder="you@gmail.com" required style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:10px">Gmail Address (sender)</label><input type="email" name="smtp_user" form="confirm-form" placeholder="sender@gmail.com" required style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:10px">Gmail App Password</label><input type="password" name="smtp_password" form="confirm-form" placeholder="xxxx xxxx xxxx xxxx" required style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><div style="font-size:11px;color:#475569;margin-top:3px">Not your Gmail password — <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:#0ea5e9">generate an App Password here</a></div>' if missing_email else ''}
-  {'<label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:12px">LinkedIn Session Cookie (li_at) — for Easy Apply <span style=\\'color:#475569;font-weight:400\\'>optional</span></label><input type="password" name="li_at" form="confirm-form" placeholder="AQEDATxxxxxxxxxxxx" style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><div style=\\'font-size:11px;color:#475569;margin-top:3px\\'>Chrome → linkedin.com → F12 → Application → Cookies → li_at → copy Value. <a href=\\'/config\\' style=\\'color:#0ea5e9\\'>More info</a></div>' if missing_li else ''}
-  <div style="font-size:11px;color:#475569;margin-top:12px">🔒 Stored in your private Neon database over encrypted SSL. Asked only once.</div>
-</div>"""
+        cred_fields = (
+            '<div style="background:#0f172a;border:1px solid #f59e0b44;border-radius:10px;padding:18px;margin-top:12px">'
+            '<div style="font-size:13px;font-weight:700;color:#f59e0b;margin-bottom:12px">🔐 Required to apply — entered once, saved securely</div>'
+            + email_html + li_html +
+            '<div style="font-size:11px;color:#475569;margin-top:12px">🔒 Stored in your private Neon database over encrypted SSL.</div>'
+            '</div>'
+        )
 
     # Confirm button
     confirm_section = f"""<form method="POST" action="/apply/{job_id}/confirm" id="confirm-form" style="margin-top:12px">
