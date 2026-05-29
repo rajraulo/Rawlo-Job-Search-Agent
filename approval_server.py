@@ -91,6 +91,9 @@ textarea{resize:vertical;min-height:110px}
 .flash-err{background:#ef444422;color:#ef4444;border:1px solid #ef444444}
 .empty{text-align:center;color:#475569;padding:40px;font-size:14px}
 .filter-bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+details[open] summary span{transform:rotate(90deg);display:inline-block}
+details summary::-webkit-details-marker{display:none}
+kbd{font-family:monospace}
 """
 
 NAV = """<nav>
@@ -431,20 +434,114 @@ def config_page():
 
 <div class="card">
   <h3>🔗 LinkedIn Credentials</h3>
-  <label>LinkedIn Session Cookie (li_at) {dot('li_at')}</label>
-  <input type="password" name="li_at" placeholder="{'Leave blank to keep existing' if creds.get('li_at') else 'AQEDATxxxxxxxxxxxx'}">
-  <div class="hint">Get from Chrome DevTools → Application → Cookies → linkedin.com → li_at value. Required for Easy Apply.</div>
 
-  <div class="form-grid" style="margin-top:4px">
+  <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:18px;margin-bottom:20px">
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:12px">
+      <span style="font-size:22px;line-height:1">🔒</span>
+      <div>
+        <div style="font-weight:700;color:#e2e8f0;font-size:14px;margin-bottom:4px">Your credentials are safe</div>
+        <div style="color:#94a3b8;font-size:13px;line-height:1.6">
+          Everything you enter here is stored in your own private Neon PostgreSQL database over an encrypted SSL connection.
+          Your credentials are <strong style="color:#e2e8f0">never logged, never shared, and never visible</strong> after saving —
+          password fields show a placeholder instead of the real value.
+          The <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">li_at</code> cookie
+          is only used to submit Easy Apply forms on LinkedIn on your behalf,
+          the same way LinkedIn's own mobile apps authenticate.
+          You can revoke access anytime by logging out of LinkedIn in that browser.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <label>LinkedIn Session Cookie (li_at) {dot('li_at')}</label>
+  <input type="password" name="li_at" placeholder="{'Leave blank to keep existing' if creds.get('li_at') else 'AQEDATxxxxxxxxxxxx — see instructions below'}">
+
+  <details style="margin-top:12px;cursor:pointer">
+    <summary style="font-size:13px;color:#0ea5e9;font-weight:600;list-style:none;display:flex;align-items:center;gap:6px;user-select:none">
+      <span>▶</span> How to get your li_at cookie (step-by-step)
+    </summary>
+    <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:20px;margin-top:12px;font-size:13px;line-height:1.8">
+
+      <div style="color:#64748b;margin-bottom:16px">Takes about 60 seconds. No extensions needed.</div>
+
+      <div style="display:flex;flex-direction:column;gap:12px">
+
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">1</span>
+          <div>Open <strong style="color:#e2e8f0">Google Chrome</strong> and go to
+            <a href="https://www.linkedin.com" target="_blank" style="color:#0ea5e9">linkedin.com</a>.
+            Make sure you are <strong style="color:#e2e8f0">logged in</strong> to your account.
+          </div>
+        </div>
+
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:function700;font-size:12px;flex-shrink:0;font-weight:700">2</span>
+          <div>Press <kbd style="background:#1e293b;border:1px solid #334155;padding:2px 8px;border-radius:4px;font-family:monospace;color:#e2e8f0">F12</kbd> on your keyboard to open <strong style="color:#e2e8f0">Developer Tools</strong>.
+          </div>
+        </div>
+
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">3</span>
+          <div>Click the <strong style="color:#e2e8f0">Application</strong> tab in the top menu of Developer Tools.
+            <div style="margin-top:6px;background:#1e293b;border-radius:6px;padding:8px 12px;font-family:monospace;color:#94a3b8;font-size:12px">
+              Elements &nbsp;|&nbsp; Console &nbsp;|&nbsp; Sources &nbsp;|&nbsp;
+              <span style="background:#0ea5e922;color:#0ea5e9;padding:2px 8px;border-radius:4px;border:1px solid #0ea5e944">Application</span>
+              &nbsp;|&nbsp; Network …
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">4</span>
+          <div>In the <strong style="color:#e2e8f0">left panel</strong>, look for
+            <strong style="color:#e2e8f0">Storage → Cookies → https://www.linkedin.com</strong>
+            and click on it.
+            <div style="margin-top:6px;background:#1e293b;border-radius:6px;padding:8px 12px;font-family:monospace;color:#94a3b8;font-size:12px;line-height:2">
+              📁 Storage<br>
+              &nbsp;&nbsp;🍪 Cookies<br>
+              &nbsp;&nbsp;&nbsp;&nbsp;<span style="background:#0ea5e922;color:#0ea5e9;padding:1px 6px;border-radius:3px">https://www.linkedin.com</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">5</span>
+          <div>In the table on the right, find the row where <strong style="color:#e2e8f0">Name = li_at</strong>.
+            Click that row, then <strong style="color:#e2e8f0">double-click the Value column</strong> to select it all, and copy it.
+            <div style="margin-top:6px;background:#1e293b;border-radius:6px;padding:8px 12px;font-family:monospace;font-size:12px;line-height:2">
+              <span style="color:#64748b">Name &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Value</span><br>
+              <span style="background:#0ea5e922;padding:1px 4px;border-radius:3px">li_at</span>
+              <span style="color:#22c55e">&nbsp;&nbsp;&nbsp;&nbsp; AQEDATB3… ← copy this</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span style="background:#22c55e;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">✓</span>
+          <div>Paste the copied value into the <strong style="color:#e2e8f0">li_at field above</strong> and save.
+            The value starts with <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">AQEDAT</code> and is around 200–300 characters long.
+          </div>
+        </div>
+
+      </div>
+
+      <div style="margin-top:16px;padding-top:16px;border-top:1px solid #1e3a5f;color:#64748b;font-size:12px">
+        ⚠️ <strong style="color:#94a3b8">If the cookie expires</strong> (LinkedIn logged you out), just repeat these steps to get a fresh one and update it here.
+        LinkedIn session cookies typically last several weeks to months.
+      </div>
+    </div>
+  </details>
+
+  <div class="form-grid" style="margin-top:16px">
     <div>
       <label>LinkedIn Email {dot('li_user_email')}</label>
-      <input type="email" name="li_user_email" value="{creds.get('li_user_email','')}" placeholder="you@gmail.com">
-      <div class="hint">Used to fill Easy Apply forms.</div>
+      <input type="email" name="li_user_email" value="{creds.get('li_user_email','')}" placeholder="you@linkedin.com">
+      <div class="hint">Used to pre-fill Easy Apply forms.</div>
     </div>
     <div>
       <label>LinkedIn Phone {dot('li_user_phone')}</label>
       <input type="text" name="li_user_phone" value="{creds.get('li_user_phone','')}" placeholder="+971 50 123 4567">
-      <div class="hint">Used to fill Easy Apply phone fields.</div>
+      <div class="hint">Used to pre-fill Easy Apply phone fields.</div>
     </div>
   </div>
 </div>
