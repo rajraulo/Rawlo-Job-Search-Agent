@@ -20,6 +20,11 @@ _RESUME_KEY  = "user_resume"
 _ROOT        = Path(__file__).resolve().parent
 
 
+def _uk(user_id: int, key: str) -> str:
+    """Namespace a store key by user_id so each user's data is isolated."""
+    return f"u{user_id}_{key}" if user_id else key
+
+
 def _db_url() -> str:
     return os.getenv("DATABASE_URL", "")
 
@@ -68,16 +73,16 @@ def _db_set(key: str, value):
 
 _LOCAL_JOBS = _ROOT / "data" / "jobs" / "found_jobs.json"
 
-def load_jobs() -> list:
+def load_jobs(user_id: int = 0) -> list:
     if use_db():
-        return _db_get(_JOBS_KEY) or []
+        return _db_get(_uk(user_id, _JOBS_KEY)) or []
     if _LOCAL_JOBS.exists():
         return json.loads(_LOCAL_JOBS.read_text())
     return []
 
-def save_jobs(jobs: list):
+def save_jobs(jobs: list, user_id: int = 0):
     if use_db():
-        _db_set(_JOBS_KEY, jobs)
+        _db_set(_uk(user_id, _JOBS_KEY), jobs)
     else:
         _LOCAL_JOBS.parent.mkdir(parents=True, exist_ok=True)
         _LOCAL_JOBS.write_text(json.dumps(jobs, indent=2, default=str))
@@ -127,66 +132,64 @@ def _default_config() -> dict:
             },
         }
 
-def load_config() -> dict:
+def load_config(user_id: int = 0) -> dict:
     if use_db():
-        saved = _db_get(_CONFIG_KEY)
+        saved = _db_get(_uk(user_id, _CONFIG_KEY))
         if saved:
-            # Ensure credentials sub-key always exists
             if "credentials" not in saved:
                 saved["credentials"] = _default_config()["credentials"]
             return saved
     return _default_config()
 
-def save_config(config: dict):
+def save_config(config: dict, user_id: int = 0):
     if use_db():
-        _db_set(_CONFIG_KEY, config)
+        _db_set(_uk(user_id, _CONFIG_KEY), config)
 
 
 # ── Run trigger ───────────────────────────────────────────────────────────────
 
-def get_trigger() -> bool:
+def get_trigger(user_id: int = 0) -> bool:
     if use_db():
-        return bool(_db_get(_TRIGGER_KEY))
+        return bool(_db_get(_uk(user_id, _TRIGGER_KEY)))
     return False
 
-def set_trigger():
+def set_trigger(user_id: int = 0):
     if use_db():
-        _db_set(_TRIGGER_KEY, True)
+        _db_set(_uk(user_id, _TRIGGER_KEY), True)
 
-def clear_trigger():
+def clear_trigger(user_id: int = 0):
     if use_db():
-        _db_set(_TRIGGER_KEY, False)
+        _db_set(_uk(user_id, _TRIGGER_KEY), False)
 
 
 # ── Agent status ──────────────────────────────────────────────────────────────
 
-def save_status(data: dict):
+def save_status(data: dict, user_id: int = 0):
     if use_db():
-        existing = _db_get(_STATUS_KEY) or {}
+        existing = _db_get(_uk(user_id, _STATUS_KEY)) or {}
         existing.update(data)
-        _db_set(_STATUS_KEY, existing)
+        _db_set(_uk(user_id, _STATUS_KEY), existing)
 
-def load_status() -> dict:
+def load_status(user_id: int = 0) -> dict:
     if use_db():
-        return _db_get(_STATUS_KEY) or {}
+        return _db_get(_uk(user_id, _STATUS_KEY)) or {}
     return {}
 
 
 # ── Resume ────────────────────────────────────────────────────────────────────
 
-def save_resume(text: str, filename: str, base64_data: str):
+def save_resume(text: str, filename: str, base64_data: str, user_id: int = 0):
     from datetime import datetime as _dt
-    _db_set(_RESUME_KEY, {
+    _db_set(_uk(user_id, _RESUME_KEY), {
         "text":        text,
         "filename":    filename,
         "base64":      base64_data,
         "uploaded_at": _dt.utcnow().isoformat(),
     })
 
-def load_resume() -> dict:
+def load_resume(user_id: int = 0) -> dict:
     if use_db():
-        return _db_get(_RESUME_KEY) or {}
-    # fallback: read local base resume
+        return _db_get(_uk(user_id, _RESUME_KEY)) or {}
     local = _ROOT / "data" / "resumes" / "base_resume.docx"
     if local.exists():
         try:

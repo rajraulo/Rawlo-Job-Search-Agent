@@ -17,19 +17,47 @@ Approval email endpoints:
 import logging
 import os
 from datetime import datetime, timezone
+from functools import wraps
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, session
 
 load_dotenv()
 
 from storage import (
-    clear_trigger, get_trigger, load_config, load_jobs, load_status,
-    save_config, save_jobs, set_trigger, use_db,
+    clear_trigger, get_trigger, load_config, load_jobs, load_resume,
+    load_status, save_config, save_jobs, save_resume, save_status,
+    set_trigger, use_db,
 )
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "change-me-in-production")
+
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+def current_user() -> dict | None:
+    uid = session.get("user_id")
+    if not uid:
+        return None
+    from auth import get_user_by_id
+    return get_user_by_id(uid)
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not use_db():
+            return f(*args, **kwargs)  # local dev: skip auth
+        if "user_id" not in session:
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return decorated
+
+
+def uid() -> int:
+    return session.get("user_id", 0)
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -109,21 +137,21 @@ kbd{font-family:monospace}
 .active-tab{color:#e2e8f0 !important;border-bottom-color:#6366f1 !important}
 """
 
-NAV = """<nav>
-  <span class="brand">🤖 Job Agent</span>
-  <a href="/" class="{d}">Dashboard</a>
-  <a href="/search" class="{s}">Search &amp; Results</a>
-  <a href="/jobs" class="{j}">All Jobs</a>
-  <a href="/config" class="{c}">Configuration</a>
-</nav>"""
-
 def _page(active, content, title="Job Agent", extra_head=""):
-    nav = NAV.format(
-        d="active" if active == "d" else "",
-        s="active" if active == "s" else "",
-        j="active" if active == "j" else "",
-        c="active" if active == "c" else "",
-    )
+    user = current_user()
+    user_info = (
+        f'<span style="color:#64748b;font-size:13px">{user["email"]}</span>'
+        '<a href="/logout" style="margin-left:12px;color:#64748b;font-size:13px">Sign out</a>'
+    ) if user else '<a href="/login" style="color:#0ea5e9;font-size:13px">Sign in</a>'
+
+    nav = f"""<nav>
+  <span class="brand">🤖 Job Agent</span>
+  <a href="/" class="{'active' if active=='d' else ''}">Dashboard</a>
+  <a href="/search" class="{'active' if active=='s' else ''}">Search &amp; Results</a>
+  <a href="/jobs" class="{'active' if active=='j' else ''}">All Jobs</a>
+  <a href="/config" class="{'active' if active=='c' else ''}">Configuration</a>
+  <span style="margin-left:auto;display:flex;align-items:center;gap:4px">{user_info}</span>
+</nav>"""
     return render_template_string(f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title}</title><style>{CSS}</style>{extra_head}</head>
@@ -161,9 +189,41 @@ def _ago(iso):
     except: return "—"
 
 def _find(field, val):
+    """Search all users' jobs for a matching approval link (email links don't carry user_id)."""
+    if use_db():
+        from storage import _db_get, _ensure_table, _get_conn
+        with _get_conn() as conn, conn.cursor() as cur:
+            _ensure_table(cur)
+            cur.execute("SELECT key, value FROM store WHERE key LIKE %s", ("u%_agent_jobs",))
+            rows = cur.fetchall()
+        for key, val_json in rows:
+            import json as _json
+            jobs = _json.loads(val_json) if isinstance(val_json, str) else val_json
+            for j in jobs:
+                if j.get(field) == val:
+                    j["_store_key"] = key
+                    return j
+        return None
     return next((j for j in load_jobs() if j.get(field) == val), None)
 
+
 def _update(field, val, status):
+    if use_db():
+        from storage import _db_get, _db_set, _get_conn, _ensure_table
+        import json as _json
+        with _get_conn() as conn, conn.cursor() as cur:
+            _ensure_table(cur)
+            cur.execute("SELECT key, value FROM store WHERE key LIKE %s", ("u%_agent_jobs",))
+            rows = cur.fetchall()
+        for key, val_json in rows:
+            jobs = _json.loads(val_json) if isinstance(val_json, str) else val_json
+            for j in jobs:
+                if j.get(field) == val:
+                    j["status"] = status
+                    j["decision_at"] = datetime.utcnow().isoformat()
+                    _db_set(key, jobs)
+                    return
+        return
     jobs = load_jobs()
     for j in jobs:
         if j.get(field) == val:
@@ -200,10 +260,11 @@ def _action_btns(job):
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @app.route("/")
+@login_required
 def index():
-    jobs   = load_jobs()
-    cfg    = load_config()
-    status = load_status()
+    jobs   = load_jobs(uid())
+    cfg    = load_config(uid())
+    status = load_status(uid())
 
     counts = {}
     for j in jobs:
@@ -306,25 +367,28 @@ def index():
 # ── Trigger ───────────────────────────────────────────────────────────────────
 
 @app.route("/trigger", methods=["POST"])
+@login_required
 def trigger():
     if use_db():
-        set_trigger()
+        set_trigger(uid())
     else:
         return redirect("/?err=nodb")
     return redirect("/")
 
 
 @app.route("/cancel-trigger", methods=["POST"])
+@login_required
 def cancel_trigger():
-    clear_trigger()
+    clear_trigger(uid())
     return redirect("/")
 
 
 # ── Jobs list ─────────────────────────────────────────────────────────────────
 
 @app.route("/jobs")
+@login_required
 def jobs_page():
-    all_jobs = load_jobs()
+    all_jobs = load_jobs(uid())
     sf = request.args.get("status", "")
     jobs = [j for j in all_jobs if j.get("status") == sf] if sf else all_jobs
     jobs = sorted(jobs, key=lambda j: j.get("scraped_at", ""), reverse=True)
@@ -395,13 +459,14 @@ def _extract_text(file_bytes: bytes, filename: str) -> str:
 
 
 @app.route("/search")
+@login_required
 def search_page():
     from storage import ats_score, load_resume, get_trigger
-    cfg      = load_config()
-    resume   = load_resume()
-    jobs     = load_jobs()
-    status   = load_status()
-    pending  = get_trigger()
+    cfg      = load_config(uid())
+    resume   = load_resume(uid())
+    jobs     = load_jobs(uid())
+    status   = load_status(uid())
+    pending  = get_trigger(uid())
 
     resume_text = resume.get("text", "")
     resume_name = resume.get("filename", "")
@@ -583,9 +648,9 @@ if(zone){{
 
 
 @app.route("/upload-resume", methods=["POST"])
+@login_required
 def upload_resume():
     import base64
-    from storage import save_resume
     f = request.files.get("resume")
     if not f or not f.filename:
         return redirect("/search?resume_err=No+file+selected")
@@ -600,7 +665,7 @@ def upload_resume():
         if not text.strip():
             return redirect("/search?resume_err=Could+not+extract+text.+Try+a+different+PDF+or+DOCX+file.")
         b64 = base64.b64encode(raw).decode()
-        save_resume(text, name, b64)
+        save_resume(text, name, b64, uid())
         return redirect("/search?resume_ok=1")
     except ValueError as e:
         return redirect(f"/search?resume_err={str(e)[:120].replace(' ','+')}")
@@ -609,12 +674,13 @@ def upload_resume():
 
 
 @app.route("/save-schedule", methods=["POST"])
+@login_required
 def save_schedule():
     try:
         minutes = max(5, int(request.form.get("minutes", 10)))
-        cfg = load_config()
+        cfg = load_config(uid())
         cfg["schedule_minutes"] = minutes
-        save_config(cfg)
+        save_config(cfg, uid())
     except Exception:
         pass
     return redirect("/search")
@@ -623,9 +689,10 @@ def save_schedule():
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 @app.route("/config", methods=["GET", "POST"])
+@login_required
 def config_page():
     flash = ""
-    cfg = load_config()
+    cfg = load_config(uid())
     creds = cfg.get("credentials", {})
 
     if request.method == "POST":
@@ -646,7 +713,7 @@ def config_page():
             cfg.setdefault("credentials", {})
             cfg["credentials"]["anthropic_api_key"] = keep(
                 "anthropic_api_key", creds.get("anthropic_api_key", ""))
-            save_config(cfg)
+            save_config(cfg, uid())
             flash = "ok"
         except Exception as e:
             flash = f"err:{e}"
@@ -742,28 +809,29 @@ def _get_anthropic_key() -> str:
     return (creds.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY", "")).strip()
 
 
-def _find_job_by_id(job_id: str) -> dict | None:
-    return next((j for j in load_jobs() if j.get("id") == job_id), None)
+def _find_job_by_id(job_id: str, user_id: int = 0) -> dict | None:
+    return next((j for j in load_jobs(user_id) if j.get("id") == job_id), None)
 
 
-def _update_job_by_id(job_id: str, **updates):
-    jobs = load_jobs()
+def _update_job_by_id(job_id: str, user_id: int = 0, **updates):
+    jobs = load_jobs(user_id)
     for j in jobs:
         if j.get("id") == job_id:
             j.update(updates)
             j["status_updated_at"] = datetime.utcnow().isoformat()
             break
-    save_jobs(jobs)
+    save_jobs(jobs, user_id)
 
 
 @app.route("/apply/<job_id>")
+@login_required
 def apply_page(job_id):
     from storage import ats_score, load_resume
-    job = _find_job_by_id(job_id)
+    job = _find_job_by_id(job_id, uid())
     if not job:
         return redirect("/search")
 
-    resume      = load_resume()
+    resume      = load_resume(uid())
     orig_text   = resume.get("text", "")
     resume_name = resume.get("filename", "No resume uploaded")
     tailored    = job.get("tailored_resume_text", "")
@@ -856,7 +924,7 @@ function showTab(t){
 </form>"""
 
     # Credentials check — collect only what's missing
-    creds = load_config().get("credentials", {})
+    creds = load_config(uid()).get("credentials", {})
     missing_email = not (creds.get("smtp_user") and creds.get("smtp_password"))
     missing_li    = not creds.get("li_at")
 
@@ -896,17 +964,27 @@ function showTab(t){
             '</div>'
         )
 
-    # Confirm button
-    confirm_section = f"""<form method="POST" action="/apply/{job_id}/confirm" id="confirm-form" style="margin-top:12px">
-  <input type="hidden" name="use_tailored" value="{'1' if tailored else '0'}">
-  {cred_fields}
-  <button type="submit" class="btn btn-green" style="width:100%;justify-content:center;padding:13px;font-size:14px;margin-top:14px"
-          onclick="this.disabled=true;this.innerHTML='⏳ Saving &amp; queuing…'">
-    ✅ Confirm &amp; Apply {'with Tailored Resume' if tailored else '(original resume)'}
-  </button>
-</form>
-<p style="text-align:center;font-size:12px;color:#475569;margin-top:8px">
-  The local orchestrator will apply via LinkedIn Easy Apply within the next scheduled run.
+    resume_label = "with tailored resume" if tailored else "with original resume"
+    confirm_section = f"""
+{cred_fields}
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px">
+  <form method="POST" action="/apply/{job_id}/confirm" id="confirm-form">
+    <input type="hidden" name="use_tailored" value="{'1' if tailored else '0'}">
+    <input type="hidden" name="action" value="approve">
+    <button type="submit" class="btn btn-green" style="width:100%;justify-content:center;padding:14px;font-size:14px"
+            onclick="this.disabled=true;this.innerHTML='⏳ Applying…'">
+      ✅ Approve &amp; Apply Now
+    </button>
+  </form>
+  <form method="POST" action="/apply/{job_id}/confirm">
+    <input type="hidden" name="action" value="decline">
+    <button type="submit" class="btn btn-red" style="width:100%;justify-content:center;padding:14px;font-size:14px">
+      ❌ Decline
+    </button>
+  </form>
+</div>
+<p style="text-align:center;font-size:12px;color:#475569;margin-top:10px">
+  Applying {resume_label} · LinkedIn Easy Apply via local orchestrator (~30 sec)
 </p>"""
 
     jsc = job.get("relevance_score", 0)
@@ -963,9 +1041,10 @@ function showTab(t){
 
 
 @app.route("/apply/<job_id>/tailor", methods=["POST"])
+@login_required
 def tailor_for_job(job_id):
     from storage import load_resume, ats_score
-    job = _find_job_by_id(job_id)
+    job = _find_job_by_id(job_id, uid())
     if not job:
         return redirect("/search")
 
@@ -973,7 +1052,7 @@ def tailor_for_job(job_id):
     if not api_key:
         return redirect(f"/apply/{job_id}?flash=nokey")
 
-    resume = load_resume()
+    resume = load_resume(uid())
     resume_text = resume.get("text", "")
     if not resume_text:
         return redirect(f"/apply/{job_id}?flash=noresume")
@@ -993,7 +1072,7 @@ def tailor_for_job(job_id):
                 f"## Current Resume:\n{resume_text}"}],
         )
         tailored_text = msg.content[0].text
-        _update_job_by_id(job_id, tailored_resume_text=tailored_text)
+        _update_job_by_id(job_id, uid(), tailored_resume_text=tailored_text)
     except Exception as e:
         logger.error(f"AI tailoring failed: {e}")
 
@@ -1001,13 +1080,21 @@ def tailor_for_job(job_id):
 
 
 @app.route("/apply/<job_id>/confirm", methods=["POST"])
+@login_required
 def confirm_apply(job_id):
-    job = _find_job_by_id(job_id)
+    job = _find_job_by_id(job_id, uid())
     if not job:
         return redirect("/search")
 
-    # Save any credentials submitted on this page
-    cfg   = load_config()
+    action = request.form.get("action", "approve")
+
+    # Decline — just mark and go back
+    if action == "decline":
+        _update_job_by_id(job_id, uid(), status="declined_stage2")
+        return redirect("/search")
+
+    # Save any credentials submitted inline on the apply page
+    cfg   = load_config(uid())
     creds = cfg.setdefault("credentials", {})
     changed = False
     for field in ("approval_email", "smtp_user", "smtp_password", "li_at",
@@ -1016,20 +1103,59 @@ def confirm_apply(job_id):
         if val:
             creds[field] = val
             changed = True
-    # set sensible defaults for SMTP if not already set
     creds.setdefault("smtp_host", "smtp.gmail.com")
     creds.setdefault("smtp_port", 587)
     creds.setdefault("approval_base_url",
                      os.getenv("APPROVAL_BASE_URL", "https://rawlo-job-search-agent.vercel.app"))
     if changed:
-        save_config(cfg)
+        save_config(cfg, uid())
 
+    # Mark approved and trigger the orchestrator to apply immediately
     use_tailored = request.form.get("use_tailored") == "1"
     updates = {"status": "approved_stage2", "apply_source": "web_ui"}
     if not use_tailored:
         updates["tailored_resume_text"] = ""
-    _update_job_by_id(job_id, **updates)
-    return redirect("/search?applied=1")
+    _update_job_by_id(job_id, uid(), **updates)
+
+    # Set the trigger so orchestrator picks this up within 30 seconds
+    if use_db():
+        set_trigger(uid())
+
+    # Show a confirmation screen instead of redirecting
+    return render_template_string(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Applying…</title>
+<style>
+body{{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
+.card{{background:#1e293b;border-radius:16px;padding:48px 40px;max-width:500px;
+      text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.4)}}
+.icon{{font-size:56px;margin-bottom:16px}}
+h1{{margin:0 0 10px;font-size:22px;color:#f1f5f9}}
+p{{color:#94a3b8;line-height:1.7;font-size:14px;margin:6px 0}}
+.job{{color:#0ea5e9;font-weight:600;font-size:15px;margin:12px 0}}
+.steps{{background:#0f172a;border-radius:10px;padding:16px 20px;margin:20px 0;text-align:left}}
+.step{{display:flex;gap:10px;align-items:flex-start;margin-bottom:10px;font-size:13px;color:#94a3b8}}
+.step:last-child{{margin-bottom:0}}
+.dot{{width:20px;height:20px;border-radius:50%;background:#0ea5e9;color:#fff;
+     font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}}
+.btn{{display:inline-block;margin-top:20px;padding:11px 28px;background:#334155;
+     color:#e2e8f0;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600}}
+</style>
+<meta http-equiv="refresh" content="5;url=/search">
+</head>
+<body><div class="card">
+  <div class="icon">🚀</div>
+  <h1>Application Approved!</h1>
+  <div class="job">{job.get('title','')} @ {job.get('company','')}</div>
+  <p>{'Using your <strong style="color:#6366f1">AI-tailored resume</strong>' if use_tailored else 'Using your original resume'}</p>
+  <div class="steps">
+    <div class="step"><div class="dot">1</div><div>Status set to <strong style="color:#22c55e">Approved</strong> in database</div></div>
+    <div class="step"><div class="dot">2</div><div>Orchestrator notified — will apply via LinkedIn Easy Apply within <strong style="color:#f59e0b">30 seconds</strong></div></div>
+    <div class="step"><div class="dot">3</div><div>Job status will update to <strong style="color:#22c55e">Applied</strong> automatically</div></div>
+  </div>
+  <p style="font-size:12px;color:#475569">Redirecting to Search in 5 seconds…</p>
+  <a href="/search" class="btn">← Back to Search</a>
+</div></body></html>""")
 
 
 # ── Approval email routes ─────────────────────────────────────────────────────
@@ -1079,6 +1205,115 @@ def decline2(aid2):
     if not job: return _card("❌","Not Found","This link is invalid or already used.", code=404)
     _update("approval2_id", aid2, "declined_stage2")
     return _card("❌","Declined","This job has been removed from your queue.", job=job)
+
+
+# ── Auth pages ────────────────────────────────────────────────────────────────
+
+AUTH_CSS = """
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',Arial,sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.box{background:#1e293b;border-radius:16px;padding:48px;width:100%;max-width:400px;
+     box-shadow:0 8px 32px rgba(0,0,0,.4)}
+h1{font-size:22px;margin:0 0 6px;color:#f1f5f9}
+.sub{color:#64748b;font-size:13px;margin-bottom:28px}
+label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;
+      letter-spacing:.5px;color:#64748b;margin-bottom:5px;margin-top:16px}
+input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;
+      color:#e2e8f0;padding:11px 14px;font-size:14px;outline:none;box-sizing:border-box}
+input:focus{border-color:#0ea5e9}
+.btn{width:100%;margin-top:22px;padding:13px;background:#0ea5e9;color:#fff;
+     border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer}
+.btn:hover{background:#0284c7}
+.link{text-align:center;margin-top:18px;font-size:13px;color:#64748b}
+.link a{color:#0ea5e9}
+.err{background:#ef444422;border:1px solid #ef444444;border-radius:8px;
+     padding:10px 14px;color:#ef4444;font-size:13px;margin-bottom:16px}
+"""
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if session.get("user_id"):
+        return redirect("/")
+    error = ""
+    if request.method == "POST":
+        email = request.form.get("email", "").strip()
+        pw    = request.form.get("password", "")
+        if not use_db():
+            session["user_id"] = 0
+            return redirect("/")
+        from auth import login as auth_login
+        user = auth_login(email, pw)
+        if user:
+            session["user_id"] = user["id"]
+            return redirect("/")
+        error = "Invalid email or password."
+    err_html = f'<div class="err">{error}</div>' if error else ""
+    return render_template_string(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Sign In — Job Agent</title>
+<style>{AUTH_CSS}</style></head><body>
+<div class="box">
+  <h1>🤖 Job Agent</h1>
+  <div class="sub">Sign in to your account</div>
+  {err_html}
+  <form method="POST">
+    <label>Email</label>
+    <input type="email" name="email" placeholder="you@gmail.com" required autofocus>
+    <label>Password</label>
+    <input type="password" name="password" placeholder="••••••••" required>
+    <button type="submit" class="btn">Sign In</button>
+  </form>
+  <div class="link">No account? <a href="/signup">Create one →</a></div>
+</div></body></html>""")
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup_page():
+    if session.get("user_id"):
+        return redirect("/")
+    error = ""
+    if request.method == "POST":
+        email = request.form.get("email", "").strip()
+        pw    = request.form.get("password", "")
+        pw2   = request.form.get("password2", "")
+        if pw != pw2:
+            error = "Passwords do not match."
+        elif len(pw) < 8:
+            error = "Password must be at least 8 characters."
+        else:
+            if not use_db():
+                session["user_id"] = 0
+                return redirect("/")
+            from auth import register
+            user = register(email, pw)
+            if user:
+                session["user_id"] = user["id"]
+                return redirect("/")
+            error = "An account with this email already exists."
+    err_html = f'<div class="err">{error}</div>' if error else ""
+    return render_template_string(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Create Account — Job Agent</title>
+<style>{AUTH_CSS}</style></head><body>
+<div class="box">
+  <h1>🤖 Job Agent</h1>
+  <div class="sub">Create your account</div>
+  {err_html}
+  <form method="POST">
+    <label>Email</label>
+    <input type="email" name="email" placeholder="you@gmail.com" required autofocus>
+    <label>Password</label>
+    <input type="password" name="password" placeholder="min 8 characters" required>
+    <label>Confirm Password</label>
+    <input type="password" name="password2" placeholder="repeat password" required>
+    <button type="submit" class="btn">Create Account</button>
+  </form>
+  <div class="link">Already have an account? <a href="/login">Sign in →</a></div>
+</div></body></html>""")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
