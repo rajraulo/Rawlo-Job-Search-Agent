@@ -633,7 +633,7 @@ def config_page():
             def lines(f): return [l.strip() for l in request.form.get(f,"").splitlines() if l.strip()]
             def keep(field, existing):
                 val = request.form.get(field, "").strip()
-                return val if val else existing  # keep existing if field left blank
+                return val if val else existing
 
             cfg["primary_keywords"]    = lines("primary_keywords")
             cfg["secondary_keywords"]  = lines("secondary_keywords")
@@ -642,21 +642,11 @@ def config_page():
             cfg["min_relevance_score"] = int(request.form.get("min_relevance_score", 60))
             cfg["schedule_minutes"]    = int(request.form.get("schedule_minutes", 10))
             cfg["max_jobs_per_run"]    = int(request.form.get("max_jobs_per_run", 20))
-
-            cfg["credentials"] = {
-                "approval_email":    keep("approval_email",    creds.get("approval_email","")),
-                "approval_base_url": keep("approval_base_url", creds.get("approval_base_url","")),
-                "smtp_host":         keep("smtp_host",         creds.get("smtp_host","smtp.gmail.com")),
-                "smtp_port":         int(request.form.get("smtp_port") or creds.get("smtp_port", 587)),
-                "smtp_user":         keep("smtp_user",         creds.get("smtp_user","")),
-                "smtp_password":     keep("smtp_password",     creds.get("smtp_password","")),
-                "li_at":             keep("li_at",             creds.get("li_at","")),
-                "li_user_email":     keep("li_user_email",     creds.get("li_user_email","")),
-                "li_user_phone":     keep("li_user_phone",     creds.get("li_user_phone","")),
-                "anthropic_api_key": keep("anthropic_api_key", creds.get("anthropic_api_key","")),
-            }
+            # preserve existing credentials — not edited on this page
+            cfg.setdefault("credentials", {})
+            cfg["credentials"]["anthropic_api_key"] = keep(
+                "anthropic_api_key", creds.get("anthropic_api_key", ""))
             save_config(cfg)
-            creds = cfg["credentials"]
             flash = "ok"
         except Exception as e:
             flash = f"err:{e}"
@@ -666,7 +656,7 @@ def config_page():
 
     flash_html = ""
     if flash == "ok":
-        flash_html = '<div class="flash flash-ok">✅ Configuration saved. The agent will use these settings on the next run.</div>'
+        flash_html = '<div class="flash flash-ok">✅ Saved. The agent will use these settings on the next run.</div>'
     elif flash:
         flash_html = f'<div class="flash flash-err">❌ {flash}</div>'
 
@@ -676,38 +666,37 @@ def config_page():
 <form method="POST" action="/config">
 
 <div class="card">
-  <h3>🔍 Job Search — Technology Stack</h3>
+  <h3>🔍 Technology Stack — What to search for</h3>
   <label>Primary Keywords — job titles to search on LinkedIn (one per line)</label>
   <textarea name="primary_keywords" placeholder="Python Developer&#10;DevOps Engineer&#10;Cloud Architect&#10;Site Reliability Engineer">{nl(cfg.get('primary_keywords',[]))}</textarea>
   <div class="hint">Each keyword is searched separately across all locations.</div>
 
-  <label>Secondary Keywords — skills for match scoring (one per line)</label>
+  <label>Secondary Keywords — skills used for ATS match scoring (one per line)</label>
   <textarea name="secondary_keywords" placeholder="Kubernetes&#10;Terraform&#10;AWS&#10;Docker&#10;CI/CD&#10;Python&#10;Ansible">{nl(cfg.get('secondary_keywords',[]))}</textarea>
-  <div class="hint">More matches in the job description = higher relevance score.</div>
+  <div class="hint">More of these found in a job description = higher match score.</div>
 
-  <label>Exclude Keywords — skip jobs containing these (one per line)</label>
+  <label>Exclude Keywords — skip jobs containing these words (one per line)</label>
   <textarea name="exclude_keywords" placeholder="Intern&#10;Junior&#10;Manager&#10;Director" style="min-height:80px">{nl(cfg.get('exclude_keywords',[]))}</textarea>
 </div>
 
 <div class="card">
-  <h3>📍 Locations</h3>
-  <label>Locations to search in (one per line)</label>
+  <h3>📍 Locations — Where to search</h3>
   <textarea name="locations" placeholder="Dubai, UAE&#10;Abu Dhabi, UAE&#10;Remote&#10;United Kingdom&#10;Germany&#10;Singapore">{nl(cfg.get('locations',[]))}</textarea>
   <div class="hint">Each location is searched for every keyword above.</div>
 </div>
 
 <div class="card">
-  <h3>⚙️ Agent Settings</h3>
+  <h3>⚙️ Search Settings</h3>
   <div class="form-grid">
     <div>
-      <label>Search Interval (minutes)</label>
+      <label>Search Every (minutes)</label>
       <input type="number" name="schedule_minutes" value="{cfg.get('schedule_minutes',10)}" min="5" max="1440">
-      <div class="hint">How often the local orchestrator polls LinkedIn. Restart orchestrator to apply.</div>
+      <div class="hint">How often the orchestrator polls LinkedIn.</div>
     </div>
     <div>
       <label>Minimum Match Score (%)</label>
       <input type="number" name="min_relevance_score" value="{cfg.get('min_relevance_score',60)}" min="0" max="100">
-      <div class="hint">Jobs below this threshold are ignored.</div>
+      <div class="hint">Jobs below this score are ignored.</div>
     </div>
   </div>
   <label style="margin-top:16px">Max New Jobs Per Run</label>
@@ -715,183 +704,20 @@ def config_page():
 </div>
 
 <div class="card">
-  <h3>📧 Email & Notifications</h3>
-  <div class="form-grid">
-    <div>
-      <label>Notification Email {dot('approval_email')}</label>
-      <input type="email" name="approval_email" value="{creds.get('approval_email','')}" placeholder="you@gmail.com">
-      <div class="hint">Where approval emails are sent.</div>
-    </div>
-    <div>
-      <label>Approval Server URL {dot('approval_base_url')}</label>
-      <input type="text" name="approval_base_url" value="{creds.get('approval_base_url','')}" placeholder="https://agent-rawlo.vercel.app">
-      <div class="hint">Base URL for approve/skip links in emails.</div>
-    </div>
-  </div>
-  <div class="form-grid" style="margin-top:4px">
-    <div>
-      <label>SMTP Username (Gmail) {dot('smtp_user')}</label>
-      <input type="email" name="smtp_user" value="{creds.get('smtp_user','')}" placeholder="sender@gmail.com">
-    </div>
-    <div>
-      <label>SMTP App Password {dot('smtp_password')}</label>
-      <input type="password" name="smtp_password" placeholder="{'Leave blank to keep existing' if creds.get('smtp_password') else 'xxxx xxxx xxxx xxxx'}">
-      <div class="hint">Use a Gmail App Password, not your real password.</div>
-    </div>
-  </div>
-  <div class="form-grid" style="margin-top:4px">
-    <div>
-      <label>SMTP Host</label>
-      <input type="text" name="smtp_host" value="{creds.get('smtp_host','smtp.gmail.com')}">
-    </div>
-    <div>
-      <label>SMTP Port</label>
-      <input type="number" name="smtp_port" value="{creds.get('smtp_port',587)}">
-    </div>
-  </div>
-</div>
-
-<div class="card">
-  <h3>🤖 AI Resume Tailoring</h3>
-  <label>Anthropic API Key {dot('anthropic_api_key')}</label>
+  <h3>🤖 AI Resume Tailoring {dot('anthropic_api_key')}</h3>
+  <label>Anthropic API Key</label>
   <input type="password" name="anthropic_api_key"
          placeholder="{'Leave blank to keep existing' if creds.get('anthropic_api_key') else 'sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx'}">
   <div class="hint">
-    Required for AI-powered resume tailoring. Get your key at
-    <a href="https://console.anthropic.com" target="_blank" style="color:#0ea5e9">console.anthropic.com</a>.
-    Used when you click "Tailor Resume with AI" on the Apply page.
+    Powers the "Tailor Resume with AI" button on the Apply page.
+    Get your key at <a href="https://console.anthropic.com" target="_blank" style="color:#0ea5e9">console.anthropic.com</a>.
   </div>
 </div>
 
 <div class="card">
   <h3>🔗 LinkedIn Credentials <span style="font-size:12px;font-weight:500;color:#64748b;margin-left:8px">— Optional</span></h3>
 
-  <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:18px;margin-bottom:16px">
-    <div style="font-weight:700;color:#e2e8f0;font-size:13px;margin-bottom:10px">❓ Why is li_at needed?</div>
-    <div style="color:#94a3b8;font-size:13px;line-height:1.7;margin-bottom:14px">
-      <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">li_at</code> is
-      <strong style="color:#e2e8f0">only used for one thing</strong> — automatically clicking
-      <strong style="color:#e2e8f0">Easy Apply</strong> on LinkedIn. LinkedIn has no public API for job applications,
-      so the agent uses a headless browser (Selenium) to open the job page and submit the form as you.
-      The <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">li_at</code> cookie
-      is your LinkedIn login session — it proves to LinkedIn that the browser is you.
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
-      <div style="background:#22c55e11;border:1px solid #22c55e33;border-radius:8px;padding:12px">
-        <div style="color:#22c55e;font-weight:700;margin-bottom:6px">✅ Works without li_at</div>
-        <div style="color:#94a3b8;line-height:1.7">Search LinkedIn for jobs<br>Score &amp; filter results<br>Tailor resume with AI<br>Send approval emails</div>
-      </div>
-      <div style="background:#0ea5e911;border:1px solid #0ea5e933;border-radius:8px;padding:12px">
-        <div style="color:#0ea5e9;font-weight:700;margin-bottom:6px">🚀 Also works with li_at</div>
-        <div style="color:#94a3b8;line-height:1.7">Auto-submit Easy Apply<br>Upload tailored resume<br>Fill application forms<br><span style="color:#64748b">(external URLs still manual)</span></div>
-      </div>
-    </div>
-  </div>
-
-  <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:14px 18px;margin-bottom:16px;display:flex;gap:10px;align-items:flex-start">
-    <span style="font-size:18px;line-height:1.4">🔒</span>
-    <div style="color:#94a3b8;font-size:13px;line-height:1.6">
-      <strong style="color:#e2e8f0">Your credentials are safe.</strong>
-      Stored in your own private Neon database over encrypted SSL —
-      never logged, never shared, never visible after saving.
-      Revoke anytime by logging out of LinkedIn in that browser.
-    </div>
-  </div>
-
-  <label>LinkedIn Session Cookie (li_at) {dot('li_at')}</label>
-  <input type="password" name="li_at" placeholder="{'Leave blank to keep existing' if creds.get('li_at') else 'AQEDATxxxxxxxxxxxx — see instructions below'}">
-
-  <details style="margin-top:12px;cursor:pointer">
-    <summary style="font-size:13px;color:#0ea5e9;font-weight:600;list-style:none;display:flex;align-items:center;gap:6px;user-select:none">
-      <span>▶</span> How to get your li_at cookie (step-by-step)
-    </summary>
-    <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:20px;margin-top:12px;font-size:13px;line-height:1.8">
-
-      <div style="color:#64748b;margin-bottom:16px">Takes about 60 seconds. No extensions needed.</div>
-
-      <div style="display:flex;flex-direction:column;gap:12px">
-
-        <div style="display:flex;gap:12px;align-items:flex-start">
-          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">1</span>
-          <div>Open <strong style="color:#e2e8f0">Google Chrome</strong> and go to
-            <a href="https://www.linkedin.com" target="_blank" style="color:#0ea5e9">linkedin.com</a>.
-            Make sure you are <strong style="color:#e2e8f0">logged in</strong> to your account.
-          </div>
-        </div>
-
-        <div style="display:flex;gap:12px;align-items:flex-start">
-          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:function700;font-size:12px;flex-shrink:0;font-weight:700">2</span>
-          <div>Press <kbd style="background:#1e293b;border:1px solid #334155;padding:2px 8px;border-radius:4px;font-family:monospace;color:#e2e8f0">F12</kbd> on your keyboard to open <strong style="color:#e2e8f0">Developer Tools</strong>.
-          </div>
-        </div>
-
-        <div style="display:flex;gap:12px;align-items:flex-start">
-          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">3</span>
-          <div>Click the <strong style="color:#e2e8f0">Application</strong> tab in the top menu of Developer Tools.
-            <div style="margin-top:6px;background:#1e293b;border-radius:6px;padding:8px 12px;font-family:monospace;color:#94a3b8;font-size:12px">
-              Elements &nbsp;|&nbsp; Console &nbsp;|&nbsp; Sources &nbsp;|&nbsp;
-              <span style="background:#0ea5e922;color:#0ea5e9;padding:2px 8px;border-radius:4px;border:1px solid #0ea5e944">Application</span>
-              &nbsp;|&nbsp; Network …
-            </div>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:12px;align-items:flex-start">
-          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">4</span>
-          <div>In the <strong style="color:#e2e8f0">left panel</strong>, look for
-            <strong style="color:#e2e8f0">Storage → Cookies → https://www.linkedin.com</strong>
-            and click on it.
-            <div style="margin-top:6px;background:#1e293b;border-radius:6px;padding:8px 12px;font-family:monospace;color:#94a3b8;font-size:12px;line-height:2">
-              📁 Storage<br>
-              &nbsp;&nbsp;🍪 Cookies<br>
-              &nbsp;&nbsp;&nbsp;&nbsp;<span style="background:#0ea5e922;color:#0ea5e9;padding:1px 6px;border-radius:3px">https://www.linkedin.com</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:12px;align-items:flex-start">
-          <span style="background:#0ea5e9;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">5</span>
-          <div>In the table on the right, find the row where <strong style="color:#e2e8f0">Name = li_at</strong>.
-            Click that row, then <strong style="color:#e2e8f0">double-click the Value column</strong> to select it all, and copy it.
-            <div style="margin-top:6px;background:#1e293b;border-radius:6px;padding:8px 12px;font-family:monospace;font-size:12px;line-height:2">
-              <span style="color:#64748b">Name &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Value</span><br>
-              <span style="background:#0ea5e922;padding:1px 4px;border-radius:3px">li_at</span>
-              <span style="color:#22c55e">&nbsp;&nbsp;&nbsp;&nbsp; AQEDATB3… ← copy this</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:12px;align-items:flex-start">
-          <span style="background:#22c55e;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">✓</span>
-          <div>Paste the copied value into the <strong style="color:#e2e8f0">li_at field above</strong> and save.
-            The value starts with <code style="background:#1e293b;padding:1px 6px;border-radius:4px;color:#0ea5e9">AQEDAT</code> and is around 200–300 characters long.
-          </div>
-        </div>
-
-      </div>
-
-      <div style="margin-top:16px;padding-top:16px;border-top:1px solid #1e3a5f;color:#64748b;font-size:12px">
-        ⚠️ <strong style="color:#94a3b8">If the cookie expires</strong> (LinkedIn logged you out), just repeat these steps to get a fresh one and update it here.
-        LinkedIn session cookies typically last several weeks to months.
-      </div>
-    </div>
-  </details>
-
-  <div class="form-grid" style="margin-top:16px">
-    <div>
-      <label>LinkedIn Email {dot('li_user_email')}</label>
-      <input type="email" name="li_user_email" value="{creds.get('li_user_email','')}" placeholder="you@linkedin.com">
-      <div class="hint">Used to pre-fill Easy Apply forms.</div>
-    </div>
-    <div>
-      <label>LinkedIn Phone {dot('li_user_phone')}</label>
-      <input type="text" name="li_user_phone" value="{creds.get('li_user_phone','')}" placeholder="+971 50 123 4567">
-      <div class="hint">Used to pre-fill Easy Apply phone fields.</div>
-    </div>
-  </div>
-</div>
-
-<button type="submit" class="save-btn">💾 Save All Configuration</button>
+<button type="submit" class="save-btn">💾 Save Configuration</button>
 </form>"""
 
     return _page("c", html, "Configuration")
@@ -1029,11 +855,29 @@ function showTab(t){
   </button>
 </form>"""
 
+    # Credentials check — collect only what's missing
+    creds = load_config().get("credentials", {})
+    missing_email = not (creds.get("smtp_user") and creds.get("smtp_password"))
+    missing_li    = not creds.get("li_at")
+
+    cred_fields = ""
+    if missing_email or missing_li:
+        cred_fields = f"""
+<div style="background:#0f172a;border:1px solid #f59e0b44;border-radius:10px;padding:18px;margin-top:12px">
+  <div style="font-size:13px;font-weight:700;color:#f59e0b;margin-bottom:12px">
+    🔐 Required to apply — enter once, saved securely
+  </div>
+  {'<label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:12px">Your Email (for job alert notifications)</label><input type="email" name="approval_email" form="confirm-form" placeholder="you@gmail.com" required style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:10px">Gmail Address (sender)</label><input type="email" name="smtp_user" form="confirm-form" placeholder="sender@gmail.com" required style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:10px">Gmail App Password</label><input type="password" name="smtp_password" form="confirm-form" placeholder="xxxx xxxx xxxx xxxx" required style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><div style="font-size:11px;color:#475569;margin-top:3px">Not your Gmail password — <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:#0ea5e9">generate an App Password here</a></div>' if missing_email else ''}
+  {'<label style="display:block;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;margin-top:12px">LinkedIn Session Cookie (li_at) — for Easy Apply <span style=\\'color:#475569;font-weight:400\\'>optional</span></label><input type="password" name="li_at" form="confirm-form" placeholder="AQEDATxxxxxxxxxxxx" style="width:100%;background:#1e293b;border:1px solid #334155;border-radius:7px;color:#e2e8f0;padding:9px 13px;font-size:13px;outline:none"><div style=\\'font-size:11px;color:#475569;margin-top:3px\\'>Chrome → linkedin.com → F12 → Application → Cookies → li_at → copy Value. <a href=\\'/config\\' style=\\'color:#0ea5e9\\'>More info</a></div>' if missing_li else ''}
+  <div style="font-size:11px;color:#475569;margin-top:12px">🔒 Stored in your private Neon database over encrypted SSL. Asked only once.</div>
+</div>"""
+
     # Confirm button
-    confirm_section = f"""<form method="POST" action="/apply/{job_id}/confirm" style="margin-top:12px">
+    confirm_section = f"""<form method="POST" action="/apply/{job_id}/confirm" id="confirm-form" style="margin-top:12px">
   <input type="hidden" name="use_tailored" value="{'1' if tailored else '0'}">
-  <button type="submit" class="btn btn-green" style="width:100%;justify-content:center;padding:13px;font-size:14px"
-          onclick="this.disabled=true;this.innerHTML='⏳ Queued…'">
+  {cred_fields}
+  <button type="submit" class="btn btn-green" style="width:100%;justify-content:center;padding:13px;font-size:14px;margin-top:14px"
+          onclick="this.disabled=true;this.innerHTML='⏳ Saving &amp; queuing…'">
     ✅ Confirm &amp; Apply {'with Tailored Resume' if tailored else '(original resume)'}
   </button>
 </form>
@@ -1138,15 +982,28 @@ def confirm_apply(job_id):
     if not job:
         return redirect("/search")
 
+    # Save any credentials submitted on this page
+    cfg   = load_config()
+    creds = cfg.setdefault("credentials", {})
+    changed = False
+    for field in ("approval_email", "smtp_user", "smtp_password", "li_at",
+                  "li_user_email", "li_user_phone"):
+        val = request.form.get(field, "").strip()
+        if val:
+            creds[field] = val
+            changed = True
+    # set sensible defaults for SMTP if not already set
+    creds.setdefault("smtp_host", "smtp.gmail.com")
+    creds.setdefault("smtp_port", 587)
+    creds.setdefault("approval_base_url",
+                     os.getenv("APPROVAL_BASE_URL", "https://rawlo-job-search-agent.vercel.app"))
+    if changed:
+        save_config(cfg)
+
     use_tailored = request.form.get("use_tailored") == "1"
-    updates = {
-        "status":           "approved_stage2",
-        "apply_source":     "web_ui",
-        "use_tailored":     use_tailored,
-    }
+    updates = {"status": "approved_stage2", "apply_source": "web_ui"}
     if not use_tailored:
         updates["tailored_resume_text"] = ""
-
     _update_job_by_id(job_id, **updates)
     return redirect("/search?applied=1")
 
